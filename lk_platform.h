@@ -28,6 +28,12 @@ typedef LK_U8  LK_B8;
 typedef LK_U16 LK_B16;
 typedef LK_U32 LK_B32;
 
+typedef enum
+{
+    LK_WINDOW_PIXELS,
+    LK_WINDOW_OPENGL,
+} LK_Window_Backend;
+
 typedef struct
 {
     LK_B32 break_frame_loop;
@@ -35,6 +41,7 @@ typedef struct
     struct
     {
         LK_B32 no_window;
+        LK_Window_Backend backend;
 
         char*  title;
         LK_S32 x;
@@ -55,8 +62,6 @@ typedef struct
 
     struct
     {
-        LK_B32 support_opengl;
-
         LK_U32 major_version;
         LK_U32 minor_version;
         LK_B32 debug_context;
@@ -124,6 +129,8 @@ typedef struct
     {
         HWND handle;
         HDC dc;
+
+        LK_Window_Backend backend;
         BITMAPINFO bitmap_info;
     } window;
 
@@ -245,9 +252,16 @@ static void lk_update_window_size()
 
     lk_platform.window.width = width;
     lk_platform.window.height = height;
+}
 
+static void lk_update_pixels_buffer()
+{
+    LK_U32 width = lk_platform.window.width;
+    LK_U32 height = lk_platform.window.height;
+    LK_U32 bitmap_width = lk_platform.pixels.width;
+    LK_U32 bitmap_height = lk_platform.pixels.height;
 
-    if (!lk_platform.opengl.support_opengl)
+    if (width != bitmap_width || height != bitmap_height)
     {
         if (lk_platform.pixels.data)
         {
@@ -273,8 +287,6 @@ static void lk_update_window_size()
 
 static void lk_repaint_window_rectangle(HDC device_context, int x, int y, int width, int height)
 {
-    // @Optimization - actually use the given dirty rectangle
-
     if (!lk_platform.pixels.data)
     {
         return;
@@ -283,6 +295,7 @@ static void lk_repaint_window_rectangle(HDC device_context, int x, int y, int wi
     void* pixels = lk_platform.pixels.data;
     BITMAPINFO* info = &lk_private.window.bitmap_info;
 
+    // @Optimization - actually use the given dirty rectangle
     LK_U32 window_width = lk_platform.window.width;
     LK_U32 window_height = lk_platform.window.height;
     LK_U32 bitmap_width = lk_platform.pixels.width;
@@ -321,17 +334,20 @@ lk_window_callback(HWND window, UINT message, WPARAM wparam, LPARAM lparam)
 
     case WM_PAINT:
     {
-        PAINTSTRUCT paint;
-        HDC device_context = BeginPaint(window, &paint);
+        if (lk_private.window.backend == LK_WINDOW_PIXELS)
+        {
+            PAINTSTRUCT paint;
+            HDC device_context = BeginPaint(window, &paint);
 
-        int x = paint.rcPaint.left;
-        int y = paint.rcPaint.top;
-        int width = paint.rcPaint.right - x;
-        int height = paint.rcPaint.bottom - y;
+            int x = paint.rcPaint.left;
+            int y = paint.rcPaint.top;
+            int width = paint.rcPaint.right - x;
+            int height = paint.rcPaint.bottom - y;
 
-        lk_repaint_window_rectangle(device_context, x, y, width, height);
+            lk_repaint_window_rectangle(device_context, x, y, width, height);
 
-        EndPaint(window, &paint);
+            EndPaint(window, &paint);
+        }
     } break;
 
     default:
@@ -442,7 +458,8 @@ static void lk_open_window()
     pixel_format_desc.cDepthBits = 32;
     pixel_format_desc.iLayerType = PFD_MAIN_PLANE;
 
-    if (lk_platform.opengl.support_opengl)
+    LK_B32 use_opengl = (lk_private.window.backend == LK_WINDOW_OPENGL);
+    if (use_opengl)
     {
         pixel_format_desc.dwFlags |= PFD_SUPPORT_OPENGL;
     }
@@ -460,7 +477,7 @@ static void lk_open_window()
         return;
     }
 
-    if (lk_platform.opengl.support_opengl)
+    if (use_opengl)
     {
         HGLRC context = wglCreateContext(dc);
         lk_private.opengl.context = context;
@@ -551,6 +568,7 @@ static void lk_open_window()
     }
 
     lk_update_window_size();
+    lk_update_pixels_buffer();
     lk_update_swap_interval();
 }
 
@@ -607,13 +625,15 @@ static void lk_window_swap_buffers()
         return;
     }
 
-    if (!lk_platform.opengl.support_opengl)
+    if (lk_private.window.backend == LK_WINDOW_PIXELS)
     {
+        lk_update_pixels_buffer();
+        
         LK_U32 width = lk_platform.window.width;
         LK_U32 height = lk_platform.window.height;
         lk_repaint_window_rectangle(dc, 0, 0, width, height);
     }
-    
+
     SwapBuffers(dc);
 }
 
@@ -624,6 +644,8 @@ static void lk_entry()
 
     lk_load_client();
     lk_private.client.init(&lk_platform);
+
+    lk_private.window.backend = lk_platform.window.backend;
 
     if (!lk_platform.window.no_window)
     {
