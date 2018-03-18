@@ -37,6 +37,7 @@ typedef enum
 typedef struct
 {
     LK_B32 break_frame_loop;
+    void* client_data;
 
     struct
     {
@@ -237,8 +238,6 @@ static void lk_unload_client()
         lk_private.client.library = 0;
     }
 }
-
-static void* temp_bitmap_memory;
 
 static void lk_update_window_size()
 {
@@ -615,6 +614,11 @@ static void lk_window_message_loop()
         TranslateMessage(&message);
         DispatchMessage(&message);
     }
+
+    if (lk_private.window.backend == LK_WINDOW_PIXELS)
+    {
+        lk_update_pixels_buffer();
+    }
 }
 
 static void lk_window_swap_buffers()
@@ -627,8 +631,6 @@ static void lk_window_swap_buffers()
 
     if (lk_private.window.backend == LK_WINDOW_PIXELS)
     {
-        lk_update_pixels_buffer();
-        
         LK_U32 width = lk_platform.window.width;
         LK_U32 height = lk_platform.window.height;
         lk_repaint_window_rectangle(dc, 0, 0, width, height);
