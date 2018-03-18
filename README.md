@@ -6,6 +6,7 @@ LK single-file public domain libraries for C & C++
 This software is in the public domain. Anyone can use it, modify it,
 roll'n'smoke hardcopies of the source code, sell it to the terrorists, etc.
 You have no legal obligation to do anything else, although I would appreciate attribution.
+
 For more license information, see UNLICENCE.
 
 ### Thanks
