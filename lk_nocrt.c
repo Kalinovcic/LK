@@ -1,4 +1,4 @@
-//  lk_nocrt.h - public domain minimal CRT implementation
+//  lk_nocrt.c - public domain minimal CRT implementation
 //  no warranty is offered or implied
 
 /*********************************************************************************************
@@ -7,12 +7,15 @@ THIS IS NOT A CRT REPLACEMENT. This library exists to help you compile programs 
 This sound easy and this library shouldn't really exist. But the authors of modern C/C++ compilers are
 doing a great job at making your life as difficult as possible when doing this.
 
+
 WHY WOULD YOU WANT TO REMOVE THE CRT?
-  * It runs code before and after yours (main or WinMain).
+  * It runs code before and after yours (main or WinMain). That code usually does some CRT prepwork,
+    but recent MSVC CRT implementations also do telemetry, it's abysmal.
   * The compiler sprinkles security checks and other overhead everywhere, even in release builds.
-  * Implementation characteristics vary between different compilers and even between different versions.
+  * Implementation characteristics vary between different compilers, and even between different versions.
   * It adds ~80kB of code to your EXE for no particular reason.
-  * If you're not careful, it links dynamically, so you need to ship with VC runtime installers.
+  * It links dynamically by default, so if you're not careful you'll need to ship with VC runtime installers.
+
 
 QUICK NOTES
     Compile your programs with the following compiler and linker switches:
@@ -57,13 +60,11 @@ DOCUMENTATION
     You can change this name with a linker switch:
         /ENTRY:my_entry_name
 
-    lk_nocrt.h will add this entry function for you. If you're using a different name, define:
+    lk_nocrt.c will add this entry function for you. If you're using a different name, define:
         #define LK_NOCRT_ENTRY_POINT my_entry_name
-    before including lk_nocrt.h
 
     If you don't want the entry point to be added to your program, define:
         #define LK_NOCRT_NO_ENTRY_POINT
-    before including lk_nocrt.h
 
 
   FUNCTIONS WITH LARGE STACK FOOTPRINTS
@@ -94,7 +95,14 @@ DOCUMENTATION
 
     If you don't want memset and memcpy to be added to your program, define:
         #define LK_NOCRT_NO_LARGE_STRUCTURES
-    before including lk_nocrt.h
+
+
+  64-BIT MATH OPERATORS FOR 32-BIT SYSTEMS
+    For 32-bit code, all registers are only 32 bits, so working with 64-bit integers creates a bit of a problem.
+    The compiler uses a bunch of functions to do 64-bit math operations with 32-bit registers.
+
+    If you don't want these functions to be added to your program, define:
+        #define LK_NOCRT_NO_64BIT_MATH
 
 
   FLOATING POINT SUPPORT
@@ -105,13 +113,580 @@ DOCUMENTATION
 
     If you don't want _fltused and these functions to be added to your program, define:
         #define LK_NOCRT_NO_FLOATING_POINT
-    before including lk_nocrt.h
 
  *********************************************************************************************/
 
 #ifdef __cplusplus
 extern "C"
 {
+#endif
+
+
+
+#ifndef LK_NOCRT_NO_64BIT_MATH
+#ifdef _M_IX86
+
+__declspec(naked) void _alldiv()
+{
+    __asm
+    {
+    push    edi
+    push    esi
+    push    ebx
+    xor     edi,edi
+    mov     eax,dword ptr [esp+20]
+    or      eax,eax
+    jge     short L1
+    inc     edi
+    mov     edx,dword ptr [esp+16]
+    neg     eax
+    neg     edx
+    sbb     eax,0
+    mov     dword ptr [esp+20],eax
+    mov     dword ptr [esp+16],edx
+L1:
+    mov     eax,dword ptr [esp+28]
+    or      eax,eax
+    jge     short L2
+    inc     edi
+    mov     edx,dword ptr [esp+24]
+    neg     eax
+    neg     edx
+    sbb     eax,0
+    mov     dword ptr [esp+28],eax
+    mov     dword ptr [esp+24],edx
+L2:
+
+    or      eax,eax
+    jnz     short L3
+    mov     ecx,dword ptr [esp+24]
+    mov     eax,dword ptr [esp+20]
+    xor     edx,edx
+    div     ecx
+    mov     ebx,eax
+    mov     eax,dword ptr [esp+16]
+    div     ecx
+    mov     edx,ebx
+    jmp     short L4
+L3:
+    mov     ebx,eax
+    mov     ecx,dword ptr [esp+24]
+    mov     edx,dword ptr [esp+20]
+    mov     eax,dword ptr [esp+16]
+L5:
+    shr     ebx,1
+    rcr     ecx,1
+    shr     edx,1
+    rcr     eax,1
+    or      ebx,ebx
+    jnz     short L5
+    div     ecx
+    mov     esi,eax
+    mul     dword ptr [esp+28]
+    mov     ecx,eax
+    mov     eax,dword ptr [esp+24]
+    mul     esi
+    add     edx,ecx
+    jc      short L6
+    cmp     edx,dword ptr [esp+20]
+    ja      short L6
+    jb      short L7
+    cmp     eax,dword ptr [esp+16]
+    jbe     short L7
+L6:
+    dec     esi
+L7:
+    xor     edx,edx
+    mov     eax,esi
+
+L4:
+    dec     edi
+    jnz     short L8
+    neg     edx
+    neg     eax
+    sbb     edx,0
+L8:
+    pop     ebx
+    pop     esi
+    pop     edi
+    ret     16
+    }
+}
+
+__declspec(naked) void _alldvrm()
+{
+    __asm
+    {
+    push    edi
+    push    esi
+    push    ebp
+    xor     edi,edi
+    xor     ebp,ebp
+    mov     eax,dword ptr [esp+20]
+    or      eax,eax
+    jge     short L1
+    inc     edi
+    inc     ebp
+    mov     edx,dword ptr [esp+16]
+    neg     eax
+    neg     edx
+    sbb     eax,0
+    mov     dword ptr [esp+20],eax
+    mov     dword ptr [esp+16],edx
+L1:
+    mov     eax,dword ptr [esp+28]
+    or      eax,eax
+    jge     short L2
+    inc     edi
+    mov     edx,dword ptr [esp+24]
+    neg     eax
+    neg     edx
+    sbb     eax,0
+    mov     dword ptr [esp+28],eax
+    mov     dword ptr [esp+24],edx
+L2:
+
+    or      eax,eax
+    jnz     short L3
+    mov     ecx,dword ptr [esp+24]
+    mov     eax,dword ptr [esp+20]
+    xor     edx,edx
+    div     ecx
+    mov     ebx,eax
+    mov     eax,dword ptr [esp+16]
+    div     ecx
+    mov     esi,eax
+    mov     eax,ebx
+    mul     dword ptr [esp+24]
+    mov     ecx,eax
+    mov     eax,esi
+    mul     dword ptr [esp+24]
+    add     edx,ecx
+    jmp     short L4
+L3:
+    mov     ebx,eax
+    mov     ecx,dword ptr [esp+24]
+    mov     edx,dword ptr [esp+20]
+    mov     eax,dword ptr [esp+16]
+L5:
+    shr     ebx,1
+    rcr     ecx,1
+    shr     edx,1
+    rcr     eax,1
+    or      ebx,ebx
+    jnz     short L5
+    div     ecx
+    mov     esi,eax
+    mul     dword ptr [esp+28]
+    mov     ecx,eax
+    mov     eax,dword ptr [esp+24]
+    mul     esi
+    add     edx,ecx
+    jc      short L6
+    cmp     edx,dword ptr [esp+20]
+    ja      short L6
+    jb      short L7
+    cmp     eax,dword ptr [esp+16]
+    jbe     short L7
+L6:
+    dec     esi
+    sub     eax,dword ptr [esp+24]
+    sbb     edx,dword ptr [esp+28]
+L7:
+    xor     ebx,ebx
+L4:
+
+    sub     eax,dword ptr [esp+16]
+    sbb     edx,dword ptr [esp+20]
+    dec     ebp
+    jns     short L9
+    neg     edx
+    neg     eax
+    sbb     edx,0
+L9:
+    mov     ecx,edx
+    mov     edx,ebx
+    mov     ebx,ecx
+    mov     ecx,eax
+    mov     eax,esi
+
+    dec     edi
+    jnz     short L8
+    neg     edx
+    neg     eax
+    sbb     edx,0
+L8:
+    pop     ebp
+    pop     esi
+    pop     edi
+    ret     16
+    }
+}
+
+__declspec(naked) void _allmul()
+{
+    __asm
+    {
+    push    ebx
+    mov     eax,dword ptr [esp + 12]
+    mov     ecx,dword ptr [esp + 16]
+    mul     ecx
+    mov     ebx,eax
+    mov     eax,dword ptr [esp + 8]
+    mul     dword ptr [esp + 20]
+    add     ebx,eax
+    mov     eax,dword ptr [esp + 8]
+    mul     ecx
+    add     edx,ebx
+    pop     ebx
+    ret     16
+    }
+}
+
+__declspec(naked) void _allrem()
+{
+    __asm
+    {
+    push    ebx
+    push    edi
+    xor     edi,edi
+    mov     eax,dword ptr [esp+16]
+    or      eax,eax
+    jge     short L1
+    inc     edi
+    mov     edx,dword ptr [esp+12]
+    neg     eax
+    neg     edx
+    sbb     eax,0
+    mov     dword ptr [esp+16],eax
+    mov     dword ptr [esp+12],edx
+L1:
+    mov     eax,dword ptr [esp+24]
+    or      eax,eax
+    jge     short L2
+    mov     edx,dword ptr [esp+20]
+    neg     eax
+    neg     edx
+    sbb     eax,0
+    mov     dword ptr [esp+24],eax
+    mov     dword ptr [esp+20],edx
+L2:
+
+    or      eax,eax
+    jnz     short L3
+    mov     ecx,dword ptr [esp+20]
+    mov     eax,dword ptr [esp+16]
+    xor     edx,edx
+    div     ecx
+    mov     eax,dword ptr [esp+12]
+    div     ecx
+    mov     eax,edx
+    xor     edx,edx
+    dec     edi
+    jns     short L4
+    jmp     short L8
+L3:
+    mov     ebx,eax
+    mov     ecx,dword ptr [esp+20]
+    mov     edx,dword ptr [esp+16]
+    mov     eax,dword ptr [esp+12]
+L5:
+    shr     ebx,1
+    rcr     ecx,1
+    shr     edx,1
+    rcr     eax,1
+    or      ebx,ebx
+    jnz     short L5
+    div     ecx
+    mov     ecx,eax
+    mul     dword ptr [esp+24]
+    xchg    ecx,eax
+    mul     dword ptr [esp+20]
+    add     edx,ecx
+    jc      short L6
+    cmp     edx,dword ptr [esp+16]
+    ja      short L6
+    jb      short L7
+    cmp     eax,dword ptr [esp+12]
+    jbe     short L7
+L6:
+    sub     eax,dword ptr [esp+20]
+    sbb     edx,dword ptr [esp+24]
+L7:
+    sub     eax,dword ptr [esp+12]
+    sbb     edx,dword ptr [esp+16]
+    dec     edi
+    jns     short L8
+L4:
+    neg     edx
+    neg     eax
+    sbb     edx,0
+
+L8:
+    pop     edi
+    pop     ebx
+    ret     16
+    }
+}
+
+__declspec(naked) void _allshl()
+{
+    __asm
+    {
+    cmp     cl, 64
+    jae     short RETZERO
+    cmp     cl, 32
+    jae     short MORE32
+    shld    edx,eax,cl
+    shl     eax,cl
+    ret
+MORE32:
+    mov     edx,eax
+    xor     eax,eax
+    and     cl,31
+    shl     edx,cl
+    ret
+RETZERO:
+    xor     eax,eax
+    xor     edx,edx
+    ret
+    }
+}
+
+__declspec(naked) void _allshr()
+{
+    __asm
+    {
+    cmp     cl,64
+    jae     short RETSIGN
+    cmp     cl, 32
+    jae     short MORE32
+    shrd    eax,edx,cl
+    sar     edx,cl
+    ret
+MORE32:
+    mov     eax,edx
+    sar     edx,31
+    and     cl,31
+    sar     eax,cl
+    ret
+RETSIGN:
+    sar     edx,31
+    mov     eax,edx
+    ret
+    }
+}
+
+__declspec(naked) void _aulldiv()
+{
+    __asm
+    {
+    push    ebx
+    push    esi
+    mov     eax,dword ptr [esp+24]
+    or      eax,eax
+    jnz     short L1
+    mov     ecx,dword ptr [esp+20]
+    mov     eax,dword ptr [esp+16]
+    xor     edx,edx
+    div     ecx
+    mov     ebx,eax
+    mov     eax,dword ptr [esp+12]
+    div     ecx
+    mov     edx,ebx
+    jmp     short L2
+L1:
+    mov     ecx,eax
+    mov     ebx,dword ptr [esp+20]
+    mov     edx,dword ptr [esp+16]
+    mov     eax,dword ptr [esp+12]
+L3:
+    shr     ecx,1
+    rcr     ebx,1
+    shr     edx,1
+    rcr     eax,1
+    or      ecx,ecx
+    jnz     short L3
+    div     ebx
+    mov     esi,eax
+    mul     dword ptr [esp+24]
+    mov     ecx,eax
+    mov     eax,dword ptr [esp+20]
+    mul     esi
+    add     edx,ecx
+    jc      short L4
+    cmp     edx,dword ptr [esp+16]
+    ja      short L4
+    jb      short L5
+    cmp     eax,dword ptr [esp+12]
+    jbe     short L5
+L4:
+    dec     esi
+L5:
+    xor     edx,edx
+    mov     eax,esi
+
+L2:
+    pop     esi
+    pop     ebx
+    ret     16
+    }
+}
+
+__declspec(naked) void _aulldvrm()
+{
+    __asm
+    {
+    push    esi
+    mov     eax,dword ptr [esp+20]
+    or      eax,eax
+    jnz     short L1
+    mov     ecx,dword ptr [esp+16]
+    mov     eax,dword ptr [esp+12]
+    xor     edx,edx
+    div     ecx
+    mov     ebx,eax
+    mov     eax,dword ptr [esp+8]
+    div     ecx
+    mov     esi,eax
+    mov     eax,ebx
+    mul     dword ptr [esp+16]
+    mov     ecx,eax
+    mov     eax,esi
+    mul     dword ptr [esp+16]
+    add     edx,ecx
+    jmp     short L2
+L1:
+    mov     ecx,eax
+    mov     ebx,dword ptr [esp+16]
+    mov     edx,dword ptr [esp+12]
+    mov     eax,dword ptr [esp+8]
+L3:
+    shr     ecx,1
+    rcr     ebx,1
+    shr     edx,1
+    rcr     eax,1
+    or      ecx,ecx
+    jnz     short L3
+    div     ebx
+    mov     esi,eax
+    mul     dword ptr [esp+20]
+    mov     ecx,eax
+    mov     eax,dword ptr [esp+16]
+    mul     esi
+    add     edx,ecx
+    jc      short L4
+    cmp     edx,dword ptr [esp+12]
+    ja      short L4
+    jb      short L5
+    cmp     eax,dword ptr [esp+8]
+    jbe     short L5
+L4:
+    dec     esi
+    sub     eax,dword ptr [esp+16]
+    sbb     edx,dword ptr [esp+20]
+L5:
+    xor     ebx,ebx
+L2:
+
+    sub     eax,dword ptr [esp+8]
+    sbb     edx,dword ptr [esp+12]
+    neg     edx
+    neg     eax
+    sbb     edx,0
+    mov     ecx,edx
+    mov     edx,ebx
+    mov     ebx,ecx
+    mov     ecx,eax
+    mov     eax,esi
+    pop     esi
+    ret     16
+    }
+}
+
+__declspec(naked) void _aullrem()
+{
+    __asm
+    {
+    push    ebx
+
+    mov     eax,dword ptr [esp+20]
+    or      eax,eax
+    jnz     short L1
+    mov     ecx,dword ptr [esp+16]
+    mov     eax,dword ptr [esp+12]
+    xor     edx,edx
+    div     ecx
+    mov     eax,dword ptr [esp+8]
+    div     ecx
+    mov     eax,edx
+    xor     edx,edx
+    jmp     short L2
+L1:
+    mov     ecx,eax
+    mov     ebx,dword ptr [esp+16]
+    mov     edx,dword ptr [esp+12]
+    mov     eax,dword ptr [esp+8]
+L3:
+    shr     ecx,1
+    rcr     ebx,1
+    shr     edx,1
+    rcr     eax,1
+    or      ecx,ecx
+    jnz     short L3
+    div     ebx
+    mov     ecx,eax
+    mul     dword ptr [esp+20]
+    xchg    ecx,eax
+    mul     dword ptr [esp+16]
+    add     edx,ecx
+    jc      short L4
+
+    cmp     edx,dword ptr [esp+12]
+    ja      short L4
+    jb      short L5
+    cmp     eax,dword ptr [esp+8]
+    jbe     short L5
+L4:
+    sub     eax,dword ptr [esp+16]
+    sbb     edx,dword ptr [esp+20]
+L5:
+    sub     eax,dword ptr [esp+8]
+    sbb     edx,dword ptr [esp+12]
+    neg     edx
+    neg     eax
+    sbb     edx,0
+L2:
+    pop     ebx
+    ret     16
+    }
+}
+
+__declspec(naked) void _aullshr()
+{
+    __asm
+    {
+    cmp     cl,64
+    jae     short RETZERO
+    cmp     cl, 32
+    jae     short MORE32
+    shrd    eax,edx,cl
+    shr     edx,cl
+    ret
+MORE32:
+    mov     eax,edx
+    xor     edx,edx
+    and     cl,31
+    shr     eax,cl
+    ret
+RETZERO:
+    xor     eax,eax
+    xor     edx,edx
+    ret
+    }
+}
+
+#endif
 #endif
 
 
@@ -191,6 +766,10 @@ void* memcpy(void* dest, const void* src, LK_NOCRT_SIZE_T count)
 #endif
 
 __declspec(dllimport) void* __stdcall GetModuleHandleA(const char* lpModuleName);
+__declspec(dllimport) void* __stdcall GetCommandLineA();
+__declspec(dllimport) __declspec(noreturn) void __stdcall ExitProcess(unsigned int uExitCode);
+
+extern int __stdcall WinMain(void* hInstance, void* hPrevInstance, void* lpCmdLine, int nCmdShow);
 
 void __stdcall LK_NOCRT_ENTRY_POINT()
 {
