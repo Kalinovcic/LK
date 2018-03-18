@@ -7,6 +7,13 @@ THIS IS NOT A CRT REPLACEMENT. This library exists to help you compile programs 
 This sound easy and this library shouldn't really exist. But the authors of modern C/C++ compilers are
 doing a great job at making your life as difficult as possible when doing this.
 
+WHY WOULD YOU WANT TO REMOVE THE CRT?
+  * It runs code before and after yours (main or WinMain).
+  * The compiler sprinkles security checks and other overhead everywhere, even in release builds.
+  * Implementation characteristics vary between different compilers and even between different versions.
+  * It adds ~80kB of code to your EXE for no particular reason.
+  * If you're not careful, it links dynamically, so you need to ship with VC runtime installers.
+
 QUICK NOTES
     Compile your programs with the following compiler and linker switches:
 
