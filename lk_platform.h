@@ -36,6 +36,7 @@ typedef struct
     {
         LK_B32 no_window;
 
+        char*  title;
         LK_S32 x;
         LK_S32 y;
         LK_U32 width;
@@ -47,12 +48,21 @@ typedef struct
 
     struct
     {
+        LK_U32 width;
+        LK_U32 height;
+        LK_U8* data;
+    } pixels;
+
+    struct
+    {
         LK_B32 support_opengl;
 
         LK_U32 major_version;
         LK_U32 minor_version;
         LK_B32 debug_context;
         LK_B32 compatibility_context;
+
+        LK_U32 swap_interval;
     } opengl;
 } LK_Platform;
 
@@ -94,6 +104,7 @@ typedef LK_CLIENT_CLOSE(LK_Client_Close_Function);
 typedef LK_CLIENT_FRAME(LK_Client_Frame_Function);
 
 typedef HGLRC WGLCreateContextAttribsARB(HDC hDC, HGLRC hShareContext, const int* attribList);
+typedef BOOL WGLSwapIntervalEXT(int interval);
 
 typedef struct
 {
@@ -113,13 +124,14 @@ typedef struct
     {
         HWND handle;
         HDC dc;
+        BITMAPINFO bitmap_info;
     } window;
 
     struct
     {
         HGLRC context;
-
         WGLCreateContextAttribsARB* wglCreateContextAttribsARB;
+        WGLSwapIntervalEXT* wglSwapIntervalEXT;
     } opengl;
 } LK_Platform_Private;
 
@@ -219,6 +231,70 @@ static void lk_unload_client()
     }
 }
 
+static void* temp_bitmap_memory;
+
+static void lk_update_window_size()
+{
+    HWND window = lk_private.window.handle;
+
+    RECT client_rect;
+    GetClientRect(window, &client_rect);
+
+    LK_U32 width = (LK_U32)(client_rect.right - client_rect.left);
+    LK_U32 height = (LK_U32)(client_rect.bottom - client_rect.top);
+
+    lk_platform.window.width = width;
+    lk_platform.window.height = height;
+
+
+    if (!lk_platform.opengl.support_opengl)
+    {
+        if (lk_platform.pixels.data)
+        {
+            VirtualFree(lk_platform.pixels.data, 0, MEM_RELEASE);
+        }
+
+        BITMAPINFOHEADER* header = &lk_private.window.bitmap_info.bmiHeader;
+        header->biSize = sizeof(BITMAPINFOHEADER);
+        header->biWidth = width;
+        header->biHeight = height;
+        header->biPlanes = 1;
+        header->biBitCount = 32;
+        header->biCompression = BI_RGB;
+
+        LK_U32 bytes_per_pixel = 4;
+        LK_U32 bitmap_size = width * height * bytes_per_pixel;
+
+        lk_platform.pixels.data = (LK_U8*) VirtualAlloc(0, bitmap_size, MEM_COMMIT, PAGE_READWRITE);
+        lk_platform.pixels.width = width;
+        lk_platform.pixels.height = height;
+    }
+}
+
+static void lk_repaint_window_rectangle(HDC device_context, int x, int y, int width, int height)
+{
+    // @Optimization - actually use the given dirty rectangle
+
+    if (!lk_platform.pixels.data)
+    {
+        return;
+    }
+
+    void* pixels = lk_platform.pixels.data;
+    BITMAPINFO* info = &lk_private.window.bitmap_info;
+
+    LK_U32 window_width = lk_platform.window.width;
+    LK_U32 window_height = lk_platform.window.height;
+    LK_U32 bitmap_width = lk_platform.pixels.width;
+    LK_U32 bitmap_height = lk_platform.pixels.height;
+
+    StretchDIBits(device_context,
+        0, 0, window_width, window_height,
+        0, 0, bitmap_width, bitmap_height,
+        pixels, info,
+        DIB_RGB_COLORS, SRCCOPY);
+}
+
 static LRESULT CALLBACK
 lk_window_callback(HWND window, UINT message, WPARAM wparam, LPARAM lparam)
 {
@@ -240,14 +316,22 @@ lk_window_callback(HWND window, UINT message, WPARAM wparam, LPARAM lparam)
 
     case WM_SIZE:
     {
-        RECT client_rect;
-        GetClientRect(window, &client_rect);
+        lk_update_window_size();
+    } break;
 
-        LK_U32 width = (LK_U32)(client_rect.right - client_rect.left);
-        LK_U32 height = (LK_U32)(client_rect.bottom - client_rect.top);
+    case WM_PAINT:
+    {
+        PAINTSTRUCT paint;
+        HDC device_context = BeginPaint(window, &paint);
 
-        lk_platform.window.width = width;
-        lk_platform.window.height = height;
+        int x = paint.rcPaint.left;
+        int y = paint.rcPaint.top;
+        int width = paint.rcPaint.right - x;
+        int height = paint.rcPaint.bottom - y;
+
+        lk_repaint_window_rectangle(device_context, x, y, width, height);
+
+        EndPaint(window, &paint);
     } break;
 
     default:
@@ -258,6 +342,15 @@ lk_window_callback(HWND window, UINT message, WPARAM wparam, LPARAM lparam)
     }
 
     return result;
+}
+
+static void lk_update_swap_interval()
+{
+    if (lk_private.opengl.wglSwapIntervalEXT)
+    {
+        int interval = lk_platform.opengl.swap_interval;
+        lk_private.opengl.wglSwapIntervalEXT(interval);
+    }
 }
 
 static void lk_open_window()
@@ -279,10 +372,37 @@ static void lk_open_window()
         return;
     }
 
-    HWND window_handle = CreateWindowExA(0, window_class.lpszClassName, "lk_platform.h",
-                                         WS_OVERLAPPEDWINDOW | WS_VISIBLE,
-                                         CW_USEDEFAULT, CW_USEDEFAULT, // x and y
-                                         CW_USEDEFAULT, CW_USEDEFAULT, // width and height
+    DWORD extended_style = 0;
+    DWORD style = WS_OVERLAPPEDWINDOW | WS_VISIBLE;
+
+    int width = CW_USEDEFAULT;
+    int height = CW_USEDEFAULT;
+    if (lk_platform.window.width != 0 && lk_platform.window.height != 0)
+    {
+        width = lk_platform.window.width;
+        height = lk_platform.window.height;
+
+        RECT window_bounds;
+        window_bounds.left = 0;
+        window_bounds.top = 0;
+        window_bounds.right = width;
+        window_bounds.bottom = height;
+        AdjustWindowRectEx(&window_bounds, style, 0, extended_style);
+
+        width = window_bounds.right - window_bounds.left;
+        height = window_bounds.bottom - window_bounds.top;
+    }
+
+    LPCSTR title = lk_platform.window.title;
+    if (!title)
+    {
+        title = "lk_platform.h";
+        lk_platform.window.title = (char*) title;
+    }
+
+    HWND window_handle = CreateWindowExA(extended_style, window_class.lpszClassName, title, style,
+                                         CW_USEDEFAULT, CW_USEDEFAULT,
+                                         width, height,
                                          0, 0, instance, 0);
 
     if (!window_handle)
@@ -293,11 +413,10 @@ static void lk_open_window()
 
     lk_private.window.handle = window_handle;
 
-    // display a black window as soon as possible
-
     SetForegroundWindow(window_handle);
     SetFocus(window_handle);
 
+    // display a black window as soon as possible
     PAINTSTRUCT paint;
     HDC paint_dc = BeginPaint(window_handle, &paint);
     PatBlt(paint_dc, paint.rcPaint.left, paint.rcPaint.top, paint.rcPaint.right - paint.rcPaint.left, paint.rcPaint.bottom - paint.rcPaint.top, BLACKNESS);
@@ -317,11 +436,16 @@ static void lk_open_window()
     ZeroMemory(&pixel_format_desc, sizeof(PIXELFORMATDESCRIPTOR));
     pixel_format_desc.nSize = sizeof(PIXELFORMATDESCRIPTOR);
     pixel_format_desc.nVersion = 1;
-    pixel_format_desc.dwFlags = PFD_DRAW_TO_WINDOW | PFD_SUPPORT_OPENGL | PFD_DOUBLEBUFFER;
+    pixel_format_desc.dwFlags = PFD_DRAW_TO_WINDOW | PFD_DOUBLEBUFFER;
     pixel_format_desc.iPixelType = PFD_TYPE_RGBA;
     pixel_format_desc.cColorBits = 32;
     pixel_format_desc.cDepthBits = 32;
     pixel_format_desc.iLayerType = PFD_MAIN_PLANE;
+
+    if (lk_platform.opengl.support_opengl)
+    {
+        pixel_format_desc.dwFlags |= PFD_SUPPORT_OPENGL;
+    }
 
     int pixel_format = ChoosePixelFormat(dc, &pixel_format_desc);
     if (!pixel_format)
@@ -353,11 +477,24 @@ static void lk_open_window()
             return;
         }
 
-        PROC proc_address = wglGetProcAddress("wglCreateContextAttribsARB");
-        if (proc_address && (proc_address != (void*) 0x1) && (proc_address != (void*) 0x2) && (proc_address != (void*) 0x3) && (proc_address != (void*) -1))
-        {
-            lk_private.opengl.wglCreateContextAttribsARB = (WGLCreateContextAttribsARB*) proc_address;
 
+        #define LK_GetWGLFunction(type, name)                                                                       \
+        {                                                                                                           \
+            void* proc = wglGetProcAddress(#name);                                                                  \
+            if (proc && (proc != (void*) 1) && (proc != (void*) 2) && (proc != (void*) 3) && (proc != (void*) -1))  \
+                lk_private.opengl.name = (type*) proc;                                                              \
+            else                                                                                                    \
+                lk_private.opengl.name = 0;                                                                         \
+        }
+
+        LK_GetWGLFunction(WGLCreateContextAttribsARB, wglCreateContextAttribsARB)
+        LK_GetWGLFunction(WGLSwapIntervalEXT, wglSwapIntervalEXT)
+
+        #undef LK_GetWGLFunction
+
+
+        if (lk_private.opengl.wglCreateContextAttribsARB)
+        {
             wglMakeCurrent(0, 0);
             wglDeleteContext(context);
 
@@ -380,6 +517,12 @@ static void lk_open_window()
             if (lk_platform.opengl.compatibility_context)
             {
                 profile = WGL_CONTEXT_COMPATIBILITY_PROFILE_BIT_ARB;
+            }
+
+            if (!lk_platform.opengl.major_version)
+            {
+                lk_platform.opengl.major_version = 3;
+                lk_platform.opengl.minor_version = 3;
             }
 
             int attributes[] =
@@ -406,6 +549,9 @@ static void lk_open_window()
             }
         }
     }
+
+    lk_update_window_size();
+    lk_update_swap_interval();
 }
 
 static void lk_close_window()
@@ -455,12 +601,20 @@ static void lk_window_message_loop()
 
 static void lk_window_swap_buffers()
 {
-    if (!lk_private.window.dc)
+    HDC dc = lk_private.window.dc;
+    if (!dc)
     {
         return;
     }
 
-    SwapBuffers(lk_private.window.dc);
+    if (!lk_platform.opengl.support_opengl)
+    {
+        LK_U32 width = lk_platform.window.width;
+        LK_U32 height = lk_platform.window.height;
+        lk_repaint_window_rectangle(dc, 0, 0, width, height);
+    }
+    
+    SwapBuffers(dc);
 }
 
 static void lk_entry()
