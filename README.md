@@ -2,6 +2,11 @@
 
 LK single-file public domain libraries for C & C++
 
+library           | description
+------------------|--------------
+**lk_platform.h** | Platform layer with hot code reloading
+**lk_nocrt.c**    | Minimal boilerplate required to compile without the CRT on MSVC
+
 ### Licence
 This software is in the public domain. Anyone can use it, modify it,
 roll'n'smoke hardcopies of the source code, sell it to the terrorists, etc.
