@@ -20,17 +20,21 @@ typedef signed char  LK_S8;
 typedef signed short LK_S16;
 typedef signed long  LK_S32;
 
-typedef unsigned char  LK_U8;
-typedef unsigned short LK_U16;
-typedef unsigned long  LK_U32;
+typedef unsigned char      LK_U8;
+typedef unsigned short     LK_U16;
+typedef unsigned long      LK_U32;
+typedef unsigned long long LK_U64;
 
 typedef LK_U8  LK_B8;
 typedef LK_U16 LK_B16;
 typedef LK_U32 LK_B32;
 
+typedef float  LK_F32;
+typedef double LK_F64;
+
 typedef enum
 {
-    LK_WINDOW_PIXELS,
+    LK_WINDOW_CANVAS,
     LK_WINDOW_OPENGL,
 } LK_Window_Backend;
 
@@ -50,8 +54,6 @@ typedef struct
         LK_U32 width;
         LK_U32 height;
         LK_B32 forbid_resizing;
-
-        LK_B32 requested_close;
     } window;
 
     struct
@@ -59,7 +61,7 @@ typedef struct
         LK_U32 width;
         LK_U32 height;
         LK_U8* data;
-    } pixels;
+    } canvas;
 
     struct
     {
@@ -70,6 +72,21 @@ typedef struct
 
         LK_U32 swap_interval;
     } opengl;
+
+    struct
+    {
+        LK_U64 delta_ticks;
+        LK_U64 delta_nanoseconds;
+        LK_U64 delta_microseconds;
+        LK_U64 delta_milliseconds;
+        LK_F64 delta_seconds;
+
+        LK_U64 ticks;
+        LK_U64 nanoseconds;
+        LK_U64 microseconds;
+        LK_U64 milliseconds;
+        LK_F64 seconds;
+    } time;
 } LK_Platform;
 
 #ifdef __cplusplus
@@ -141,6 +158,16 @@ typedef struct
         WGLCreateContextAttribsARB* wglCreateContextAttribsARB;
         WGLSwapIntervalEXT* wglSwapIntervalEXT;
     } opengl;
+
+    struct
+    {
+        LK_U64 initial_ticks;
+        LK_U64 ticks_per_second;
+
+        LK_U64 unprocessed_nanoseconds;
+        LK_U64 unprocessed_microseconds;
+        LK_U64 unprocessed_milliseconds;
+    } time;
 } LK_Platform_Private;
 
 static LK_Platform lk_platform;
@@ -253,18 +280,18 @@ static void lk_update_window_size()
     lk_platform.window.height = height;
 }
 
-static void lk_update_pixels_buffer()
+static void lk_update_canvas()
 {
     LK_U32 width = lk_platform.window.width;
     LK_U32 height = lk_platform.window.height;
-    LK_U32 bitmap_width = lk_platform.pixels.width;
-    LK_U32 bitmap_height = lk_platform.pixels.height;
+    LK_U32 canvas_width = lk_platform.canvas.width;
+    LK_U32 canvas_height = lk_platform.canvas.height;
 
-    if (width != bitmap_width || height != bitmap_height)
+    if (width != canvas_width || height != canvas_height)
     {
-        if (lk_platform.pixels.data)
+        if (lk_platform.canvas.data)
         {
-            VirtualFree(lk_platform.pixels.data, 0, MEM_RELEASE);
+            VirtualFree(lk_platform.canvas.data, 0, MEM_RELEASE);
         }
 
         BITMAPINFOHEADER* header = &lk_private.window.bitmap_info.bmiHeader;
@@ -276,29 +303,29 @@ static void lk_update_pixels_buffer()
         header->biCompression = BI_RGB;
 
         LK_U32 bytes_per_pixel = 4;
-        LK_U32 bitmap_size = width * height * bytes_per_pixel;
+        LK_U32 canvas_size = width * height * bytes_per_pixel;
 
-        lk_platform.pixels.data = (LK_U8*) VirtualAlloc(0, bitmap_size, MEM_COMMIT, PAGE_READWRITE);
-        lk_platform.pixels.width = width;
-        lk_platform.pixels.height = height;
+        lk_platform.canvas.data = (LK_U8*) VirtualAlloc(0, canvas_size, MEM_COMMIT, PAGE_READWRITE);
+        lk_platform.canvas.width = width;
+        lk_platform.canvas.height = height;
     }
 }
 
-static void lk_repaint_window_rectangle(HDC device_context, int x, int y, int width, int height)
+static void lk_repaint_canvas_rectangle(HDC device_context, int x, int y, int width, int height)
 {
-    if (!lk_platform.pixels.data)
+    if (!lk_platform.canvas.data)
     {
         return;
     }
 
-    void* pixels = lk_platform.pixels.data;
+    void* pixels = lk_platform.canvas.data;
     BITMAPINFO* info = &lk_private.window.bitmap_info;
 
     // @Optimization - actually use the given dirty rectangle
     LK_U32 window_width = lk_platform.window.width;
     LK_U32 window_height = lk_platform.window.height;
-    LK_U32 bitmap_width = lk_platform.pixels.width;
-    LK_U32 bitmap_height = lk_platform.pixels.height;
+    LK_U32 bitmap_width = lk_platform.canvas.width;
+    LK_U32 bitmap_height = lk_platform.canvas.height;
 
     StretchDIBits(device_context,
         0, 0, window_width, window_height,
@@ -323,7 +350,7 @@ lk_window_callback(HWND window, UINT message, WPARAM wparam, LPARAM lparam)
 
     case WM_CLOSE:
     {
-        lk_platform.window.requested_close = 1;
+        lk_platform.break_frame_loop = 1;
     } break;
 
     case WM_SIZE:
@@ -333,7 +360,7 @@ lk_window_callback(HWND window, UINT message, WPARAM wparam, LPARAM lparam)
 
     case WM_PAINT:
     {
-        if (lk_private.window.backend == LK_WINDOW_PIXELS)
+        if (lk_private.window.backend == LK_WINDOW_CANVAS)
         {
             PAINTSTRUCT paint;
             HDC device_context = BeginPaint(window, &paint);
@@ -343,7 +370,7 @@ lk_window_callback(HWND window, UINT message, WPARAM wparam, LPARAM lparam)
             int width = paint.rcPaint.right - x;
             int height = paint.rcPaint.bottom - y;
 
-            lk_repaint_window_rectangle(device_context, x, y, width, height);
+            lk_repaint_canvas_rectangle(device_context, x, y, width, height);
 
             EndPaint(window, &paint);
         }
@@ -567,7 +594,7 @@ static void lk_open_window()
     }
 
     lk_update_window_size();
-    lk_update_pixels_buffer();
+    lk_update_canvas();
     lk_update_swap_interval();
 }
 
@@ -615,9 +642,9 @@ static void lk_window_message_loop()
         DispatchMessage(&message);
     }
 
-    if (lk_private.window.backend == LK_WINDOW_PIXELS)
+    if (lk_private.window.backend == LK_WINDOW_CANVAS)
     {
-        lk_update_pixels_buffer();
+        lk_update_canvas();
     }
 }
 
@@ -629,14 +656,56 @@ static void lk_window_swap_buffers()
         return;
     }
 
-    if (lk_private.window.backend == LK_WINDOW_PIXELS)
+    if (lk_private.window.backend == LK_WINDOW_CANVAS)
     {
         LK_U32 width = lk_platform.window.width;
         LK_U32 height = lk_platform.window.height;
-        lk_repaint_window_rectangle(dc, 0, 0, width, height);
+        lk_repaint_canvas_rectangle(dc, 0, 0, width, height);
     }
 
     SwapBuffers(dc);
+}
+
+static void lk_initialize_timer()
+{
+    LARGE_INTEGER i64;
+    QueryPerformanceFrequency(&i64);
+    lk_private.time.ticks_per_second = i64.QuadPart;
+
+    QueryPerformanceCounter(&i64);
+    lk_private.time.initial_ticks = i64.QuadPart;
+}
+
+static void lk_update_time_stamp()
+{
+    LARGE_INTEGER i64;
+    QueryPerformanceCounter(&i64);
+
+    LK_U64 frequency = lk_private.time.ticks_per_second;
+    LK_U64 new_ticks = i64.QuadPart - lk_private.time.initial_ticks;
+    LK_U64 delta_ticks = new_ticks - lk_platform.time.ticks;
+
+    lk_platform.time.delta_ticks = delta_ticks;
+
+    LK_U64 nanoseconds_ticks = 1000000000 * delta_ticks + lk_private.time.unprocessed_nanoseconds;
+    lk_platform.time.delta_nanoseconds = nanoseconds_ticks / frequency;
+    lk_private.time.unprocessed_nanoseconds = nanoseconds_ticks % frequency;
+
+    LK_U64 microseconds_ticks = 1000000 * delta_ticks + lk_private.time.unprocessed_microseconds;
+    lk_platform.time.delta_microseconds = microseconds_ticks / frequency;
+    lk_private.time.unprocessed_microseconds = microseconds_ticks % frequency;
+
+    LK_U64 milliseconds_ticks = 1000 * delta_ticks + lk_private.time.unprocessed_milliseconds;
+    lk_platform.time.delta_milliseconds = milliseconds_ticks / frequency;
+    lk_private.time.unprocessed_milliseconds = milliseconds_ticks % frequency;
+
+    lk_platform.time.delta_seconds = (double) delta_ticks / (double) frequency;
+
+    lk_platform.time.ticks        += delta_ticks;
+    lk_platform.time.nanoseconds  += lk_platform.time.delta_nanoseconds;
+    lk_platform.time.microseconds += lk_platform.time.delta_microseconds;
+    lk_platform.time.milliseconds += lk_platform.time.delta_milliseconds;
+    lk_platform.time.seconds      += lk_platform.time.delta_seconds;
 }
 
 static void lk_entry()
@@ -645,6 +714,8 @@ static void lk_entry()
     lk_check_client_reload();
 
     lk_load_client();
+
+    lk_initialize_timer();
     lk_private.client.init(&lk_platform);
 
     lk_private.window.backend = lk_platform.window.backend;
@@ -664,11 +735,13 @@ static void lk_entry()
 
         lk_window_message_loop();
 
+        lk_update_time_stamp();
         lk_private.client.frame(&lk_platform);
 
         lk_window_swap_buffers();
     }
 
+    lk_update_time_stamp();
     lk_private.client.close(&lk_platform);
 
     lk_close_window();
