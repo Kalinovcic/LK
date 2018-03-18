@@ -26,21 +26,21 @@ QUICK NOTES
         cl %CL_NOCRT% <your cl input> -link %LINK_NOCRT% <your link input>
 
     Remember that once you remove the CRT, you're not allowed to use:
-        C++ RTTI (turned off by /GR-)
-        C++ exceptions (turned off by /EHa-)
-        SEH exceptions (you can if you implement _C_specific_handler for 64-bit and _except_handler3 for 32-bit architectures)
-        globals with C++ constructors/destructors (you can implement it yourself)
-        pure virtual functions (you can if you implement __purecall)
-        new/delete C++ operators (you can if you implement them)
+      * C++ RTTI (turned off by /GR-)
+      * C++ exceptions (turned off by /EHa-)
+      * SEH exceptions (you can if you implement _C_specific_handler for 64-bit and _except_handler3 for 32-bit architectures)
+      * globals with C++ constructors/destructors (you can implement it yourself)
+      * pure virtual functions (you can if you implement __purecall)
+      * new/delete C++ operators (you can if you implement them)
 
     Most of these you don't care about if you're working in C,
     and you probably shouldn't care about if you're working in C++.
 
     Of course, you can't use anything from the C standard library, except for:
-        stddef.h  for size_t and NULL
-        stdint.h  for int##_t and uint##_t
-        stdarg.h  for varargs
-        intrin.h  for intrinsics
+      * stddef.h  for size_t and NULL
+      * stdint.h  for int##_t and uint##_t
+      * stdarg.h  for varargs
+      * intrin.h  for intrinsics
 
 
 LICENSE
