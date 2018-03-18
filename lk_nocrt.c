@@ -21,7 +21,7 @@ QUICK NOTES
     Compile your programs with the following compiler and linker switches:
 
         set CL_NOCRT= lk_nocrt.c /GS- /Gs10000000 /GR- /EHa-
-        set LINK_NOCRT= /nodefaultlib /stack:0x100000,0x100000
+        set LINK_NOCRT= /NODEFAULTLIB /STACK:0x100000,0x100000
 
         cl %CL_NOCRT% <your cl input> -link %LINK_NOCRT% <your link input>
 
@@ -42,6 +42,11 @@ QUICK NOTES
       * stdarg.h  for varargs
       * intrin.h  for intrinsics
 
+    Note that linker switch /NODEFAULTLIB has another side effect, which is that kernel32.lib won't be
+    automatically passed as input to the linker. If you're using kernel32 (you probably are), make sure to
+    pass it to the linker manually. In fact, the entry point provided by this library calls ExitProcess,
+    so unless you're writing your own entry point, this is required.
+
 
 LICENSE
     This software is in the public domain. Anyone can use it, modify it,
@@ -54,16 +59,22 @@ LICENSE
 DOCUMENTATION
 
   ENTRY POINT
-    The entry name for executable programs is WinMainCRTStartup,
-    for DLLs it is _DllMainCRTStartup.
+    The entry name for executable Windows applications is WinMainCRTStartup,
+    for console applications it is mainCRTStartup, and for DLLs it is _DllMainCRTStartup.
+    By default, lk_nocrt.c assumes you're compiling a Windows application, and generate
+    an entry that calls WinMain(). If instead you would like to build a console application
+    and call main(), define:
+        #define LK_NOCRT_CONSOLE_SUBSYSTEM
 
-    You can change this name with a linker switch:
+    In the interest of keeping the amount of code at a minimum, the entry function defined by lk_nocrt.c
+    doesn't fill out the arguments to main() or WinMain(). All of the arguments are zero.
+
+    If you wish to change the name of the entry point, use a linker switch:
         /ENTRY:my_entry_name
-
-    lk_nocrt.c will add this entry function for you. If you're using a different name, define:
+    and define:
         #define LK_NOCRT_ENTRY_POINT my_entry_name
-
-    If you don't want the entry point to be added to your program, define:
+    
+    If you want to define the entry point yourself, or don't want an entry point at all, define:
         #define LK_NOCRT_NO_ENTRY_POINT
 
 
@@ -761,21 +772,35 @@ void* memcpy(void* dest, const void* src, LK_NOCRT_SIZE_T count)
 
 #ifndef LK_NOCRT_NO_ENTRY_POINT
 
+__declspec(dllimport) __declspec(noreturn) void __stdcall ExitProcess(unsigned int uExitCode);
+
+#ifdef LK_NOCRT_CONSOLE_SUBSYSTEM
+
+#ifndef LK_NOCRT_ENTRY_POINT
+#define LK_NOCRT_ENTRY_POINT mainCRTStartup
+#endif
+
+extern int main(int argc, char** argv);
+void __stdcall LK_NOCRT_ENTRY_POINT()
+{
+    int exit_code = main(0, 0);
+    ExitProcess(exit_code);
+}
+
+#else
+
 #ifndef LK_NOCRT_ENTRY_POINT
 #define LK_NOCRT_ENTRY_POINT WinMainCRTStartup
 #endif
 
-__declspec(dllimport) void* __stdcall GetModuleHandleA(const char* lpModuleName);
-__declspec(dllimport) void* __stdcall GetCommandLineA();
-__declspec(dllimport) __declspec(noreturn) void __stdcall ExitProcess(unsigned int uExitCode);
-
 extern int __stdcall WinMain(void* hInstance, void* hPrevInstance, void* lpCmdLine, int nCmdShow);
-
 void __stdcall LK_NOCRT_ENTRY_POINT()
 {
-    int exit_code = WinMain(GetModuleHandleA(0), 0, GetCommandLineA(), 0);
+    int exit_code = WinMain(0, 0, 0, 0);
     ExitProcess(exit_code);
 }
+
+#endif
 
 #endif
 
