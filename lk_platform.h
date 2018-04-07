@@ -61,6 +61,122 @@ typedef enum
 
 typedef struct
 {
+    LK_B8 pressed;
+    LK_B8 released;
+    LK_B8 down;
+    LK_B8 was_down; // The state of "down" for the previous frame.
+} LK_Digital_Button;
+
+typedef enum
+{
+    LK_KEY_ESCAPE = 1,
+    LK_KEY_GRAVE,
+    LK_KEY_TAB,
+    LK_KEY_CAPS_LOCK,
+    LK_KEY_LEFT_SHIFT,
+    LK_KEY_LEFT_CONTROL,
+    LK_KEY_LEFT_WINDOWS,
+    LK_KEY_LEFT_ALT,
+    LK_KEY_RIGHT_SHIFT,
+    LK_KEY_RIGHT_CONTROL,
+    LK_KEY_RIGHT_WINDOWS,
+    LK_KEY_RIGHT_ALT,
+    LK_KEY_SPACE,
+    LK_KEY_BACKSPACE,
+    LK_KEY_ENTER,
+
+    LK_KEY_PRINT_SCREEN,
+    LK_KEY_SCREEN_LOCK,
+    LK_KEY_PAUSE,
+    LK_KEY_INSERT,
+    LK_KEY_DELETE,
+    LK_KEY_HOME,
+    LK_KEY_END,
+    LK_KEY_PAGE_UP,
+    LK_KEY_PAGE_DOWN,
+
+    LK_KEY_ARROW_LEFT,
+    LK_KEY_ARROW_RIGHT,
+    LK_KEY_ARROW_UP,
+    LK_KEY_ARROW_DOWN,
+
+    LK_KEY_0 = 48, // '0'
+    LK_KEY_1,
+    LK_KEY_2,
+    LK_KEY_3,
+    LK_KEY_4,
+    LK_KEY_5,
+    LK_KEY_6,
+    LK_KEY_7,
+    LK_KEY_8,
+    LK_KEY_9,
+
+    LK_KEY_A = 65, // 'A'
+    LK_KEY_B,
+    LK_KEY_C,
+    LK_KEY_D,
+    LK_KEY_E,
+    LK_KEY_F,
+    LK_KEY_G,
+    LK_KEY_H,
+    LK_KEY_I,
+    LK_KEY_J,
+    LK_KEY_K,
+    LK_KEY_L,
+    LK_KEY_M,
+    LK_KEY_N,
+    LK_KEY_O,
+    LK_KEY_P,
+    LK_KEY_Q,
+    LK_KEY_R,
+    LK_KEY_S,
+    LK_KEY_T,
+    LK_KEY_U,
+    LK_KEY_V,
+    LK_KEY_W,
+    LK_KEY_X,
+    LK_KEY_Y,
+    LK_KEY_Z,
+
+    LK_KEY_PERIOD,
+    LK_KEY_COMMA,
+
+    LK_KEY_NUMLOCK = 128,
+    LK_KEY_NUMPAD_PLUS,
+    LK_KEY_NUMPAD_MINUS,
+    LK_KEY_NUMPAD_MULTIPLY,
+    LK_KEY_NUMPAD_DIVIDE,
+    LK_KEY_NUMPAD_PERIOD,
+    LK_KEY_NUMPAD_ENTER,
+    LK_KEY_NUMPAD_0,
+    LK_KEY_NUMPAD_1,
+    LK_KEY_NUMPAD_2,
+    LK_KEY_NUMPAD_3,
+    LK_KEY_NUMPAD_4,
+    LK_KEY_NUMPAD_5,
+    LK_KEY_NUMPAD_6,
+    LK_KEY_NUMPAD_7,
+    LK_KEY_NUMPAD_8,
+    LK_KEY_NUMPAD_9,
+
+    LK_KEY_F1,
+    LK_KEY_F2,
+    LK_KEY_F3,
+    LK_KEY_F4,
+    LK_KEY_F5,
+    LK_KEY_F6,
+    LK_KEY_F7,
+    LK_KEY_F8,
+    LK_KEY_F9,
+    LK_KEY_F10,
+    LK_KEY_F11,
+    LK_KEY_F12,
+
+    LK__KEY_COUNT = 256,
+} LK_Key;
+
+typedef struct
+{
     LK_B32 break_frame_loop;
     void* client_data;
 
@@ -76,6 +192,23 @@ typedef struct
         LK_U32 height;
         LK_B32 forbid_resizing;
     } window;
+
+    struct
+    {
+        LK_S32 x;
+        LK_S32 y;
+        LK_S32 delta_x;
+        LK_S32 delta_y;
+        LK_S32 delta_wheel;
+
+        LK_Digital_Button left_button;
+        LK_Digital_Button right_button;
+    } mouse;
+
+    struct
+    {
+        LK_Digital_Button state[LK__KEY_COUNT];
+    } keyboard;
 
     struct
     {
@@ -287,10 +420,11 @@ static void lk_unload_client()
     }
 }
 
-static void lk_update_window_size()
+static void lk_pull_window_data()
 {
     HWND window = lk_private.window.handle;
 
+    // get width and height
     RECT client_rect;
     GetClientRect(window, &client_rect);
 
@@ -299,6 +433,32 @@ static void lk_update_window_size()
 
     lk_platform.window.width = width;
     lk_platform.window.height = height;
+
+    // get X and Y
+    POINT window_position = { client_rect.left, client_rect.top };
+    ClientToScreen(window, &window_position);
+
+    lk_platform.window.x = window_position.x;
+    lk_platform.window.y = window_position.y;
+}
+
+static void lk_pull_mouse_data()
+{
+    POINT mouse_position;
+    GetCursorPos(&mouse_position);
+
+    mouse_position.x -= lk_platform.window.x;
+    mouse_position.y -= lk_platform.window.y;
+
+    lk_platform.mouse.x = mouse_position.x;
+    lk_platform.mouse.y = mouse_position.y;
+}
+
+static void lk_update_digital_button(LK_Digital_Button* button)
+{
+    button->pressed = (button->down && !button->was_down);
+    button->released = (!button->down && button->was_down);
+    button->was_down = button->down;
 }
 
 static void lk_update_canvas()
@@ -374,9 +534,164 @@ lk_window_callback(HWND window, UINT message, WPARAM wparam, LPARAM lparam)
         lk_platform.break_frame_loop = 1;
     } break;
 
-    case WM_SIZE:
+    case WM_INPUT:
     {
-        lk_update_window_size();
+        UINT struct_size;
+        GetRawInputData((HRAWINPUT) lparam, RID_INPUT, 0, &struct_size, sizeof(RAWINPUTHEADER));
+
+        static char struct_memory[256];
+        if (struct_size > sizeof(struct_memory))
+        {
+            // @Reconsider - I never seem to get any input structures larger than 48 bytes, so 256 bytes should be fine.
+            // I don't want to allocate on the heap for input, and I don't want to use alloca because that requires the CRT.
+            // We could do some assembly though... But it doesn't seem to be necessary.
+            goto run_default_proc;
+        }
+
+        if (GetRawInputData((HRAWINPUT) lparam, RID_INPUT, struct_memory, &struct_size, sizeof(RAWINPUTHEADER)) != struct_size)
+        {
+            goto run_default_proc;
+        }
+
+        RAWINPUT* input = (RAWINPUT*) struct_memory;
+
+        if (input->header.dwType == RIM_TYPEMOUSE && input->data.mouse.usFlags == MOUSE_MOVE_RELATIVE)
+        {
+            USHORT button_flags = input->data.mouse.usButtonFlags;
+
+            lk_platform.mouse.delta_x += input->data.mouse.lLastX;
+            lk_platform.mouse.delta_y += input->data.mouse.lLastY;
+
+            if (button_flags & RI_MOUSE_LEFT_BUTTON_DOWN)
+            {
+                lk_platform.mouse.left_button.down = 1;
+            }
+            if (button_flags & RI_MOUSE_LEFT_BUTTON_UP)
+            {
+                lk_platform.mouse.left_button.down = 0;
+            }
+
+            if (button_flags & RI_MOUSE_RIGHT_BUTTON_DOWN)
+            {
+                lk_platform.mouse.right_button.down = 1;
+            }
+            if (button_flags & RI_MOUSE_RIGHT_BUTTON_UP)
+            {
+                lk_platform.mouse.right_button.down = 0;
+            }
+
+            if (button_flags & RI_MOUSE_WHEEL)
+            {
+                lk_platform.mouse.delta_wheel += ((SHORT) input->data.mouse.usButtonData) / WHEEL_DELTA;
+            }
+        }
+
+        if (input->header.dwType == RIM_TYPEKEYBOARD)
+        {
+            USHORT virtual_key = input->data.keyboard.VKey;
+            USHORT scan_code   = input->data.keyboard.MakeCode;
+            USHORT flags       = input->data.keyboard.Flags;
+
+            if (virtual_key == 0xFF)
+            {
+                goto run_default_proc;
+            }
+            else if (virtual_key == VK_SHIFT)
+            {
+                // left shift  vs  right shift
+                virtual_key = MapVirtualKey(scan_code, MAPVK_VSC_TO_VK_EX);
+            }
+            else if (virtual_key == VK_NUMLOCK)
+            {
+                // pause/break  vs  numlock
+                // MapVirtualKey is buggy, so we need to manually set the extended bit
+                scan_code = MapVirtualKey(virtual_key, MAPVK_VK_TO_VSC) | 0x100;
+            }
+
+            int is_e0 = (flags & RI_KEY_E0) != 0;
+            int is_e1 = (flags & RI_KEY_E1) != 0;
+
+            if (is_e1)
+            {
+                // MapVirtualKey is buggy, so we need to set VK_PAUSE manually
+                scan_code = (virtual_key == VK_PAUSE) ? 0x45 : MapVirtualKey(virtual_key, MAPVK_VK_TO_VSC);
+            }
+
+            switch (virtual_key)
+            {
+            case VK_CONTROL: virtual_key = is_e0 ? VK_RCONTROL : VK_LCONTROL; break;
+            case VK_MENU:    virtual_key = is_e0 ? VK_RMENU    : VK_LMENU;    break;
+            case VK_RETURN:  if ( is_e0) virtual_key = VK_RETURN;  break;
+            case VK_INSERT:  if (!is_e0) virtual_key = VK_NUMPAD0; break;
+            case VK_DELETE:  if (!is_e0) virtual_key = VK_DECIMAL; break;
+            case VK_HOME:    if (!is_e0) virtual_key = VK_NUMPAD7; break;
+            case VK_END:     if (!is_e0) virtual_key = VK_NUMPAD1; break;
+            case VK_PRIOR:   if (!is_e0) virtual_key = VK_NUMPAD9; break;
+            case VK_NEXT:    if (!is_e0) virtual_key = VK_NUMPAD3; break;
+            case VK_LEFT:    if (!is_e0) virtual_key = VK_NUMPAD4; break;
+            case VK_RIGHT:   if (!is_e0) virtual_key = VK_NUMPAD6; break;
+            case VK_UP:      if (!is_e0) virtual_key = VK_NUMPAD8; break;
+            case VK_DOWN:    if (!is_e0) virtual_key = VK_NUMPAD2; break;
+            case VK_CLEAR:   if (!is_e0) virtual_key = VK_NUMPAD5; break;
+            }
+
+
+            LK_Key key = (LK_Key) 0;
+
+            if (virtual_key >= '0' && virtual_key <= '9') key = (LK_Key)((int) LK_KEY_0 + (virtual_key - '0'));
+            if (virtual_key >= 'A' && virtual_key <= 'Z') key = (LK_Key)((int) LK_KEY_A + (virtual_key - 'A'));
+            if (virtual_key >=  96 && virtual_key <= 105) key = (LK_Key)((int) LK_KEY_NUMPAD_0 + (virtual_key - 96));
+            if (virtual_key >= 112 && virtual_key <= 123) key = (LK_Key)((int) LK_KEY_F1 + (virtual_key - 112));
+
+            switch (virtual_key)
+            {
+            case 27:  key = LK_KEY_ESCAPE;          break;
+            case 192: key = LK_KEY_GRAVE;           break;
+            case 9:   key = LK_KEY_TAB;             break;
+            case 20:  key = LK_KEY_CAPS_LOCK;       break;
+            case 160: key = LK_KEY_LEFT_SHIFT;      break;
+            case 162: key = LK_KEY_LEFT_CONTROL;    break;
+            case 91:  key = LK_KEY_LEFT_WINDOWS;    break;
+            case 164: key = LK_KEY_LEFT_ALT;        break;
+            case 161: key = LK_KEY_RIGHT_SHIFT;     break;
+            case 163: key = LK_KEY_RIGHT_CONTROL;   break;
+            case 92:  key = LK_KEY_RIGHT_WINDOWS;   break;
+            case 165: key = LK_KEY_RIGHT_ALT;       break;
+            case 32:  key = LK_KEY_SPACE;           break;
+            case 8:   key = LK_KEY_BACKSPACE;       break;
+            case 13:  key = LK_KEY_ENTER;           break;
+            case 44:  key = LK_KEY_PRINT_SCREEN;    break;
+            case 145: key = LK_KEY_SCREEN_LOCK;     break;
+            case 19:  key = LK_KEY_PAUSE;           break;
+            case 45:  key = LK_KEY_INSERT;          break;
+            case 46:  key = LK_KEY_DELETE;          break;
+            case 36:  key = LK_KEY_HOME;            break;
+            case 35:  key = LK_KEY_END;             break;
+            case 33:  key = LK_KEY_PAGE_UP;         break;
+            case 34:  key = LK_KEY_PAGE_DOWN;       break;
+            case 37:  key = LK_KEY_ARROW_LEFT;      break;
+            case 39:  key = LK_KEY_ARROW_RIGHT;     break;
+            case 38:  key = LK_KEY_ARROW_UP;        break;
+            case 40:  key = LK_KEY_ARROW_DOWN;      break;
+            case 190: key = LK_KEY_PERIOD;          break;
+            case 188: key = LK_KEY_COMMA;           break;
+            case 144: key = LK_KEY_NUMLOCK;         break;
+            case 107: key = LK_KEY_NUMPAD_PLUS;     break;
+            case 109: key = LK_KEY_NUMPAD_MINUS;    break;
+            case 106: key = LK_KEY_NUMPAD_MULTIPLY; break;
+            case 111: key = LK_KEY_NUMPAD_DIVIDE;   break;
+            case 110: key = LK_KEY_NUMPAD_PERIOD;   break;
+            case 96:  key = LK_KEY_NUMPAD_ENTER;    break;
+            }
+
+            if (key)
+            {
+                int is_down = (flags & RI_KEY_BREAK) == 0;
+                lk_platform.keyboard.state[key].down = is_down;
+            }
+        }
+
+        goto run_default_proc;
     } break;
 
     case WM_PAINT:
@@ -395,16 +710,20 @@ lk_window_callback(HWND window, UINT message, WPARAM wparam, LPARAM lparam)
 
             EndPaint(window, &paint);
         }
+        
+        goto run_default_proc;
     } break;
 
     default:
     {
-        result = DefWindowProc(window, message, wparam, lparam);
+        goto run_default_proc;
     } break;
 
     }
 
     return result;
+run_default_proc:
+    return DefWindowProc(window, message, wparam, lparam);
 }
 
 static void lk_update_swap_interval()
@@ -459,7 +778,7 @@ static void lk_open_window()
     LPCSTR title = lk_platform.window.title;
     if (!title)
     {
-        title = "lk_platform.h";
+        title = "app";
         lk_platform.window.title = (char*) title;
     }
 
@@ -503,6 +822,7 @@ static void lk_open_window()
     pixel_format_desc.iPixelType = PFD_TYPE_RGBA;
     pixel_format_desc.cColorBits = 32;
     pixel_format_desc.cDepthBits = 32;
+    pixel_format_desc.cStencilBits = 32;
     pixel_format_desc.iLayerType = PFD_MAIN_PLANE;
 
     LK_B32 use_opengl = (lk_private.window.backend == LK_WINDOW_OPENGL);
@@ -591,8 +911,8 @@ static void lk_open_window()
 
             int attributes[] =
             {
-                WGL_CONTEXT_MAJOR_VERSION_ARB, lk_platform.opengl.major_version,
-                WGL_CONTEXT_MINOR_VERSION_ARB, lk_platform.opengl.minor_version,
+                WGL_CONTEXT_MAJOR_VERSION_ARB, (int) lk_platform.opengl.major_version,
+                WGL_CONTEXT_MINOR_VERSION_ARB, (int) lk_platform.opengl.minor_version,
                 WGL_CONTEXT_FLAGS_ARB, flags,
                 WGL_CONTEXT_PROFILE_MASK_ARB, profile,
                 0
@@ -614,9 +934,33 @@ static void lk_open_window()
         }
     }
 
-    lk_update_window_size();
+    lk_pull_window_data();
+    lk_pull_mouse_data();
     lk_update_canvas();
     lk_update_swap_interval();
+
+
+    RAWINPUTDEVICE raw_input_mouse;
+    ZeroMemory(&raw_input_mouse, sizeof(raw_input_mouse));
+    raw_input_mouse.usUsagePage = 0x01;
+    raw_input_mouse.usUsage = 0x02;
+    raw_input_mouse.hwndTarget = window_handle;
+    if (!RegisterRawInputDevices(&raw_input_mouse, 1, sizeof(raw_input_mouse)))
+    {
+        /* @Incomplete - logging */
+        return;
+    }
+
+    RAWINPUTDEVICE raw_input_keyboard;
+    ZeroMemory(&raw_input_keyboard, sizeof(raw_input_keyboard));
+    raw_input_keyboard.usUsagePage = 0x01;
+    raw_input_keyboard.usUsage = 0x06;
+    raw_input_keyboard.hwndTarget = window_handle;
+    if (!RegisterRawInputDevices(&raw_input_keyboard, 1, sizeof(raw_input_keyboard)))
+    {
+        /* @Incomplete - logging */
+        return;
+    }
 }
 
 static void lk_close_window()
@@ -656,6 +1000,10 @@ static void lk_window_message_loop()
         return;
     }
 
+    lk_platform.mouse.delta_x = 0;
+    lk_platform.mouse.delta_y = 0;
+    lk_platform.mouse.delta_wheel = 0;
+
     MSG message;
     while (PeekMessageA(&message, 0, 0, 0, PM_REMOVE))
     {
@@ -666,6 +1014,18 @@ static void lk_window_message_loop()
     if (lk_private.window.backend == LK_WINDOW_CANVAS)
     {
         lk_update_canvas();
+    }
+
+    lk_pull_window_data();
+    lk_pull_mouse_data();
+
+    lk_update_digital_button(&lk_platform.mouse.left_button);
+    lk_update_digital_button(&lk_platform.mouse.right_button);
+
+    for (int key_index = 0; key_index < LK__KEY_COUNT; key_index++)
+    {
+        LK_Digital_Button* button = lk_platform.keyboard.state + key_index;
+        lk_update_digital_button(button);
     }
 }
 
