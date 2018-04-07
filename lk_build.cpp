@@ -763,7 +763,7 @@ int main(int argc, char** argv)
     find_file_times(&config);
 
     double finish = time_stamp();
-    printf("Source tree scan finished in %.2lf ms\n", (finish - start) * 1000);
+    double tree_scan_time = finish - start;
 
 
     int success_count = 0;
@@ -772,17 +772,27 @@ int main(int argc, char** argv)
     start = time_stamp();
     do_incremental_compilation(&config, &success_count, &failure_count);
     finish = time_stamp();
-
-    printf("Compilation took %.2f seconds\n", finish - start);
-    printf("%d compilation unit%s succeeded\n", success_count, EnglishPlural(success_count));
-    printf("%d compilation unit%s failed\n", failure_count, EnglishPlural(failure_count));
+    double compilation_time = finish - start;
 
 
     start = time_stamp();
     do_linking(&config);
     finish = time_stamp();
+    double linking_time = finish - start;
 
-    printf("Linking took %.2f seconds\n", finish - start);
+
+    /*
+    printf("Source tree scan finished in %.2lf ms\n", tree_scan_time * 1000);
+    printf("Compilation took %.2f seconds\n", compilation_time);
+    printf("%d compilation unit%s succeeded\n", success_count, EnglishPlural(success_count));
+    printf("%d compilation unit%s failed\n", failure_count, EnglishPlural(failure_count));
+    printf("Linking took %.2f seconds\n", linking_time);
+    */
+
+    printf("%d/%d success, %d/%d fail (scan %.2fs, cl %.2fs, link %.2fs)\n",
+        success_count, (int) config.source_files.size(),
+        failure_count, (int) config.source_files.size(),
+        tree_scan_time, compilation_time, linking_time);
 
 
     return EXIT_SUCCESS;
