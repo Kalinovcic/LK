@@ -190,7 +190,10 @@ typedef struct
         LK_S32 y;
         LK_U32 width;
         LK_U32 height;
+
         LK_B32 forbid_resizing;
+        LK_B32 undecorated;
+        LK_B32 invisible;
     } window;
 
     struct
@@ -208,6 +211,7 @@ typedef struct
     struct
     {
         LK_Digital_Button state[LK__KEY_COUNT];
+        char* text; // UTF-8 formatted string.
     } keyboard;
 
     struct
@@ -269,7 +273,7 @@ extern "C"
 #endif
 
 #ifndef LK_WINDOW_CLASS_NAME
-#define LK_WINDOW_CLASS_NAME "lk_platform_window_class"
+#define LK_WINDOW_CLASS_NAME L"lk_platform_window_class"
 #endif
 
 
@@ -282,6 +286,11 @@ typedef LK_CLIENT_FRAME(LK_Client_Frame_Function);
 
 typedef HGLRC WGLCreateContextAttribsARB(HDC hDC, HGLRC hShareContext, const int* attribList);
 typedef BOOL WGLSwapIntervalEXT(int interval);
+
+enum
+{
+    LK_MAX_TEXT_SIZE = 256,
+};
 
 typedef struct
 {
@@ -304,7 +313,22 @@ typedef struct
 
         LK_Window_Backend backend;
         BITMAPINFO bitmap_info;
+
+        LK_S32 x;
+        LK_S32 y;
+        LK_U32 width;
+        LK_U32 height;
+
+        LK_B32 forbid_resizing;
+        LK_B32 undecorated;
+        LK_B32 invisible;
     } window;
+
+    struct
+    {
+        int text_size;
+        char text_buffer[LK_MAX_TEXT_SIZE];
+    } keyboard;
 
     struct
     {
@@ -420,6 +444,92 @@ static void lk_unload_client()
     }
 }
 
+static void lk_window_update_title()
+{
+    HWND window = lk_private.window.handle;
+    SetWindowTextA(window, lk_platform.window.title);
+}
+
+static LONG lk_apply_window_style(LONG old_style)
+{
+    LONG resizable_flags = WS_THICKFRAME | WS_MAXIMIZEBOX;
+    LONG decoration_flags = WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
+
+    LONG style = old_style & ~(resizable_flags | decoration_flags);
+
+    if (!lk_platform.window.undecorated)
+    {
+        style |= decoration_flags;
+        style &= ~WS_POPUP;
+
+        if (!lk_platform.window.forbid_resizing)
+        {
+            style |= resizable_flags;
+        }
+    }
+    else
+    {
+        style |= WS_POPUP;
+    }
+
+    return style;
+}
+
+static void lk_push_window_data()
+{
+    HWND window = lk_private.window.handle;
+
+    int force_resize = 0;
+
+    if (lk_private.window.undecorated != lk_platform.window.undecorated ||
+        lk_private.window.forbid_resizing != lk_platform.window.forbid_resizing)
+    {
+        LONG style = GetWindowLong(window, GWL_STYLE);
+        style = lk_apply_window_style(style);
+        SetWindowLong(window, GWL_STYLE, style);
+
+        lk_private.window.undecorated = lk_platform.window.undecorated;
+        lk_private.window.forbid_resizing = lk_platform.window.forbid_resizing;
+        force_resize = 1;
+    }
+
+    if ((lk_private.window.width  != lk_platform.window.width ) ||
+        (lk_private.window.height != lk_platform.window.height) ||
+        (lk_private.window.x      != lk_platform.window.x     ) ||
+        (lk_private.window.y      != lk_platform.window.y     ) ||
+        force_resize)
+    {
+        LONG style = GetWindowLong(window, GWL_STYLE);
+        LONG extended_style = GetWindowLong(window, GWL_EXSTYLE);
+
+        // client dimensions to window dimensions
+        LK_U32 width = lk_platform.window.width;
+        LK_U32 height = lk_platform.window.height;
+
+        RECT window_bounds;
+        window_bounds.left = 0;
+        window_bounds.top = 0;
+        window_bounds.right = width;
+        window_bounds.bottom = height;
+        AdjustWindowRectEx(&window_bounds, style, 0, extended_style);
+
+        width = window_bounds.right - window_bounds.left;
+        height = window_bounds.bottom - window_bounds.top;
+
+        // move and resize the window
+        LK_S32 x = lk_platform.window.x + window_bounds.left;
+        LK_S32 y = lk_platform.window.y + window_bounds.top;
+
+        MoveWindow(window, x, y, width, height, 0);
+    }
+
+    if (lk_private.window.invisible != lk_platform.window.invisible)
+    {
+        ShowWindow(window, lk_platform.window.invisible ? SW_HIDE : SW_SHOW);
+        lk_private.window.invisible = lk_platform.window.invisible;
+    }
+}
+
 static void lk_pull_window_data()
 {
     HWND window = lk_private.window.handle;
@@ -433,6 +543,8 @@ static void lk_pull_window_data()
 
     lk_platform.window.width = width;
     lk_platform.window.height = height;
+    lk_private.window.width = width;
+    lk_private.window.height = height;
 
     // get X and Y
     POINT window_position = { client_rect.left, client_rect.top };
@@ -440,6 +552,8 @@ static void lk_pull_window_data()
 
     lk_platform.window.x = window_position.x;
     lk_platform.window.y = window_position.y;
+    lk_private.window.x = window_position.x;
+    lk_private.window.y = window_position.y;
 }
 
 static void lk_pull_mouse_data()
@@ -520,7 +634,7 @@ lk_window_callback(HWND window, UINT message, WPARAM wparam, LPARAM lparam)
 {
     if (window != lk_private.window.handle)
     {
-        return DefWindowProc(window, message, wparam, lparam);
+        return DefWindowProcW(window, message, wparam, lparam);
     }
 
 
@@ -532,6 +646,33 @@ lk_window_callback(HWND window, UINT message, WPARAM wparam, LPARAM lparam)
     case WM_CLOSE:
     {
         lk_platform.break_frame_loop = 1;
+    } break;
+
+    case WM_CHAR:
+    {
+        // @Incomplete - Currently doesn't support surrogate pairs.
+
+        WCHAR utf16 = (WCHAR) wparam;
+        char utf8[16];
+
+        int length = WideCharToMultiByte(CP_UTF8, 0, &utf16, 1, utf8, sizeof(utf8), 0, 0);
+
+        int old_text_size = lk_private.keyboard.text_size;
+        int new_text_size = old_text_size + length;
+        if (length && new_text_size < LK_MAX_TEXT_SIZE)
+        {
+            lk_private.keyboard.text_size = new_text_size;
+
+            char* read = &utf8[0];
+            char* write = lk_private.keyboard.text_buffer + old_text_size;
+            while (length--)
+            {
+                *(write++) = *(read++);
+            }
+
+            *write = 0;
+        }
+        break;
     } break;
 
     case WM_INPUT:
@@ -723,7 +864,7 @@ lk_window_callback(HWND window, UINT message, WPARAM wparam, LPARAM lparam)
 
     return result;
 run_default_proc:
-    return DefWindowProc(window, message, wparam, lparam);
+    return DefWindowProcW(window, message, wparam, lparam);
 }
 
 static void lk_update_swap_interval()
@@ -737,29 +878,30 @@ static void lk_update_swap_interval()
 
 static void lk_open_window()
 {
-    WNDCLASSEXA window_class;
-    ZeroMemory(&window_class, sizeof(WNDCLASSEXA));
+    WNDCLASSEXW window_class;
+    ZeroMemory(&window_class, sizeof(WNDCLASSEXW));
 
     HINSTANCE instance = GetModuleHandle(0);
 
-    window_class.cbSize = sizeof(WNDCLASSEXA);
+    window_class.cbSize = sizeof(WNDCLASSEXW);
     window_class.style = CS_OWNDC | CS_HREDRAW | CS_VREDRAW;
     window_class.lpfnWndProc = lk_window_callback;
     window_class.hInstance = instance;
     window_class.lpszClassName = LK_WINDOW_CLASS_NAME;
 
-    if (!RegisterClassExA(&window_class))
+    if (!RegisterClassExW(&window_class))
     {
         /* @Incomplete - logging */
         return;
     }
 
     DWORD extended_style = 0;
-    DWORD style = WS_OVERLAPPEDWINDOW | WS_VISIBLE;
+    DWORD style = lk_apply_window_style(0);
 
+    // adjust window size if specified (client size to window size)
     int width = CW_USEDEFAULT;
     int height = CW_USEDEFAULT;
-    if (lk_platform.window.width != 0 && lk_platform.window.height != 0)
+    if (lk_platform.window.width || lk_platform.window.height)
     {
         width = lk_platform.window.width;
         height = lk_platform.window.height;
@@ -771,21 +913,28 @@ static void lk_open_window()
         window_bounds.bottom = height;
         AdjustWindowRectEx(&window_bounds, style, 0, extended_style);
 
-        width = window_bounds.right - window_bounds.left;
-        height = window_bounds.bottom - window_bounds.top;
+        width = (window_bounds.right - window_bounds.left);
+        height = (window_bounds.bottom - window_bounds.top);
     }
 
-    LPCSTR title = lk_platform.window.title;
-    if (!title)
+    // position the window on the center of the primary monitor
+    int x = CW_USEDEFAULT;
+    int y = CW_USEDEFAULT;
+
+    HMONITOR primary_monitor = MonitorFromWindow(0, MONITOR_DEFAULTTOPRIMARY);
+    MONITORINFO primary_monitor_info;
+    primary_monitor_info.cbSize = sizeof(MONITORINFO);
+
+    if (GetMonitorInfo(primary_monitor, &primary_monitor_info))
     {
-        title = "app";
-        lk_platform.window.title = (char*) title;
+        x = (primary_monitor_info.rcWork.left + primary_monitor_info.rcWork.right  - width ) / 2;
+        y = (primary_monitor_info.rcWork.top  + primary_monitor_info.rcWork.bottom - height) / 2;
     }
 
-    HWND window_handle = CreateWindowExA(extended_style, window_class.lpszClassName, title, style,
-                                         CW_USEDEFAULT, CW_USEDEFAULT,
-                                         width, height,
-                                         0, 0, instance, 0);
+
+
+    HWND window_handle = CreateWindowExW(extended_style, window_class.lpszClassName, L"", style,
+                                         x, y, width, height, 0, 0, instance, 0);
 
     if (!window_handle)
     {
@@ -793,10 +942,30 @@ static void lk_open_window()
         return;
     }
 
+
     lk_private.window.handle = window_handle;
+
+
+    if (!lk_platform.window.title)
+    {
+        lk_platform.window.title = "app";
+    }
+
+    SetWindowTextA(window_handle, lk_platform.window.title);
+
+    if (!lk_platform.window.invisible)
+    {
+        ShowWindow(window_handle, SW_SHOW);
+    }
+
+
+    lk_private.window.undecorated = lk_platform.window.undecorated;
+    lk_private.window.forbid_resizing = lk_platform.window.forbid_resizing;
+    lk_private.window.invisible = lk_platform.window.invisible;
 
     SetForegroundWindow(window_handle);
     SetFocus(window_handle);
+
 
     // display a black window as soon as possible
     PAINTSTRUCT paint;
@@ -986,7 +1155,7 @@ static void lk_close_window()
         DestroyWindow(window);
     }
 
-    UnregisterClass(LK_WINDOW_CLASS_NAME, instance);
+    UnregisterClassW(LK_WINDOW_CLASS_NAME, instance);
 
     lk_private.window.handle = 0;
     lk_private.window.dc = 0;
@@ -1003,6 +1172,12 @@ static void lk_window_message_loop()
     lk_platform.mouse.delta_x = 0;
     lk_platform.mouse.delta_y = 0;
     lk_platform.mouse.delta_wheel = 0;
+
+    lk_private.keyboard.text_size = 0;
+    lk_private.keyboard.text_buffer[0] = 0;
+    lk_platform.keyboard.text = lk_private.keyboard.text_buffer;
+
+    lk_push_window_data();
 
     MSG message;
     while (PeekMessageA(&message, 0, 0, 0, PM_REMOVE))
@@ -1118,6 +1293,8 @@ static void lk_entry()
 
         lk_update_time_stamp();
         lk_private.client.frame(&lk_platform);
+
+        lk_window_update_title();
 
         lk_window_swap_buffers();
     }
