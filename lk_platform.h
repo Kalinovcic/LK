@@ -175,6 +175,11 @@ typedef enum
     LK__KEY_COUNT = 256,
 } LK_Key;
 
+enum
+{
+    LK_DEFAULT_POSITION = 0x80000000,
+};
+
 typedef struct
 {
     LK_B32 break_frame_loop;
@@ -186,6 +191,12 @@ typedef struct
         LK_Window_Backend backend;
 
         char*  title;
+
+        // During initialization, x and y will be set to LK_DEFAULT_POSITION, width and height will be set to zero.
+        // You may modify these to specify initial window coordinates or dimensions. Otherwise, the window will be
+        // centered on the primary monitor and get some default dimensions. During execution, changing these will
+        // move or resize the window.
+        // All of these are relative to the client space, not the actual window.
         LK_S32 x;
         LK_S32 y;
         LK_U32 width;
@@ -917,18 +928,36 @@ static void lk_open_window()
         height = (window_bounds.bottom - window_bounds.top);
     }
 
-    // position the window on the center of the primary monitor
-    int x = CW_USEDEFAULT;
-    int y = CW_USEDEFAULT;
+    int x = lk_platform.window.x;
+    int y = lk_platform.window.y;
 
-    HMONITOR primary_monitor = MonitorFromWindow(0, MONITOR_DEFAULTTOPRIMARY);
-    MONITORINFO primary_monitor_info;
-    primary_monitor_info.cbSize = sizeof(MONITORINFO);
-
-    if (GetMonitorInfo(primary_monitor, &primary_monitor_info))
+    if (x == LK_DEFAULT_POSITION || y == LK_DEFAULT_POSITION)
     {
-        x = (primary_monitor_info.rcWork.left + primary_monitor_info.rcWork.right  - width ) / 2;
-        y = (primary_monitor_info.rcWork.top  + primary_monitor_info.rcWork.bottom - height) / 2;
+        // try to position the window on the center of the primary monitor
+        x = CW_USEDEFAULT;
+        y = CW_USEDEFAULT;
+
+        HMONITOR primary_monitor = MonitorFromWindow(0, MONITOR_DEFAULTTOPRIMARY);
+        MONITORINFO primary_monitor_info;
+        primary_monitor_info.cbSize = sizeof(MONITORINFO);
+
+        if (GetMonitorInfo(primary_monitor, &primary_monitor_info))
+        {
+            x = (primary_monitor_info.rcWork.left + primary_monitor_info.rcWork.right  - width ) / 2;
+            y = (primary_monitor_info.rcWork.top  + primary_monitor_info.rcWork.bottom - height) / 2;
+        }
+    }
+    else
+    {
+        RECT window_bounds;
+        window_bounds.left = 0;
+        window_bounds.top = 0;
+        window_bounds.right = 0;
+        window_bounds.bottom = 0;
+        AdjustWindowRectEx(&window_bounds, style, 0, extended_style);
+
+        x += window_bounds.left;
+        y += window_bounds.top;
     }
 
 
@@ -1268,6 +1297,9 @@ static void lk_entry()
 {
     lk_get_dll_paths();
     lk_check_client_reload();
+
+    lk_platform.window.x = LK_DEFAULT_POSITION;
+    lk_platform.window.y = LK_DEFAULT_POSITION;
 
     lk_load_client();
 
