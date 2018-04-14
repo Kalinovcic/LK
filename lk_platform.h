@@ -190,6 +190,27 @@ typedef enum
 struct LK_Platform_Structure;
 typedef void LK_Audio_Callback(struct LK_Platform_Structure* platform, LK_S16* samples);
 
+typedef struct
+{
+    LK_S16* samples;
+    LK_U32 count;
+    LK_U32 channels;
+    LK_U32 frequency;
+} LK_Wave;
+
+typedef struct
+{
+    LK_B32 playing;
+    LK_Wave wave;
+    LK_B32 loop;
+    LK_F32 volume;
+} LK_Sound;
+
+enum
+{
+    LK_MIXER_SLOT_COUNT = 32,
+};
+
 typedef struct LK_Platform_Structure
 {
     LK_B32 break_frame_loop;
@@ -259,8 +280,10 @@ typedef struct LK_Platform_Structure
         LK_B32 silent_when_not_focused;
 
         LK_U32 channels;
-        LK_U32 frequency; // isn't affected by "channels", channels are sampled separately
+        LK_U32 frequency;
         LK_U32 sample_count;
+
+        LK_Sound mixer_slots[LK_MIXER_SLOT_COUNT];
     } audio;
 
     struct
@@ -325,6 +348,25 @@ enum
     LK_MAX_TEXT_SIZE = 256,
 };
 
+typedef enum
+{
+    LK_NOT_PLAYING,
+    LK_PLAYING,
+    LK_FINISHED,
+} LK_Playing_State;
+
+typedef struct
+{
+    LK_Playing_State state;
+
+    LK_Wave wave;
+    LK_B32 loop;
+    LK_F32 volume;
+
+    LK_F32 cursor;
+    LK_F32 cursor_step;
+} LK_Playing_Sound;
+
 typedef struct
 {
     struct
@@ -379,6 +421,9 @@ typedef struct
         LK_U32 secondary_buffer_size;
         LK_U32 sample_buffer_size;
         LK_U32 sample_buffer_count;
+
+        HANDLE mixer_mutex;
+        LK_Playing_Sound mixer_slots[LK_MIXER_SLOT_COUNT];
     } audio;
 
     struct
@@ -1353,11 +1398,141 @@ static void lk_update_time_stamp()
     lk_platform.time.seconds      += lk_platform.time.delta_seconds;
 }
 
-static void lk_mixer_callback(LK_Platform* platform, LK_S16* samples)
+static void lk_mixer_synchronize()
 {
-    // @Incomplete
-    int count = lk_platform.audio.sample_count;
-    ZeroMemory(samples, count);
+    float playing_frequency = (float) lk_platform.audio.frequency;
+
+    HANDLE mutex = lk_private.audio.mixer_mutex;
+    WaitForSingleObject(mutex, INFINITE);
+    {
+        for (int sound_index = 0; sound_index < LK_MIXER_SLOT_COUNT; sound_index++)
+        {
+            LK_Sound* user = lk_platform.audio.mixer_slots + sound_index;
+            LK_Playing_Sound* live = lk_private.audio.mixer_slots + sound_index;
+
+            LK_B32 playing = user->playing;
+            switch (live->state)
+            {
+            case LK_NOT_PLAYING:
+            {
+                if (playing)
+                {
+                    goto begin_playing;
+                }
+            } break;
+            case LK_PLAYING:
+            {
+                if (!playing)
+                {
+                    live->state = LK_NOT_PLAYING;
+                }
+                else
+                {
+                    live->volume = user->volume;
+                }
+            } break;
+            case LK_FINISHED:
+            {
+                live->state = LK_NOT_PLAYING;
+                user->playing = 0;
+            } break;
+            }
+
+            continue;
+            begin_playing:
+            {
+                live->state = LK_PLAYING;
+                live->wave = user->wave;
+                live->loop = user->loop;
+                live->volume = user->volume;
+                live->cursor = 0;
+                live->cursor_step = user->wave.frequency / playing_frequency;
+            } continue;
+        }
+    }
+    ReleaseMutex(mutex);
+}
+
+static void lk_mixer_callback(LK_Platform* unused, LK_S16* output)
+{
+    HANDLE mutex = lk_private.audio.mixer_mutex;
+    WaitForSingleObject(mutex, INFINITE);
+
+
+    LK_U32 output_channels = lk_platform.audio.channels;
+    LK_U32 output_count = lk_platform.audio.sample_count;
+    LK_Playing_Sound* slots = lk_private.audio.mixer_slots;
+
+    LK_S32 sound_count;
+    LK_F32 samples_sum[8];
+    while (output_count--)
+    {
+        sound_count = 0;
+        ZeroMemory(samples_sum, output_channels * sizeof(LK_F32));
+
+        for (int sound_index = 0; sound_index < LK_MIXER_SLOT_COUNT; sound_index++)
+        {
+            LK_Playing_Sound* sound = slots + sound_index;
+            if (sound->state != LK_PLAYING) continue;
+            sound_count++;
+
+            LK_U32 count = sound->wave.count;
+            LK_U32 channels = sound->wave.channels;
+            LK_F32 volume = sound->volume;
+
+            LK_U32 cursor = (LK_U32) sound->cursor;
+            sound->cursor += sound->cursor_step;
+            if ((LK_U32) sound->cursor >= count)
+            {
+                if (sound->loop)
+                {
+                    sound->cursor = 0;
+                }
+                else
+                {
+                    sound->state = LK_FINISHED;
+                }
+            }
+
+            LK_S16* source = sound->wave.samples + (cursor * channels);
+            if (channels == output_channels)
+            {
+                for (int channel = 0; channel < channels; channel++)
+                    samples_sum[channel] += (LK_F32)(*(source++)) * volume;
+            }
+            else if (output_channels == 1)
+            {
+                LK_S32 single = 0;
+                for (int channel = 0; channel < channels; channel++)
+                    single += *(source++);
+                samples_sum[0] += ((LK_F32) single / (LK_F32) channels) * volume;
+            }
+            else
+            {
+                for (int channel = 0; channel < output_channels; channel++)
+                    samples_sum[channel] += (LK_F32)(*source) * volume;
+            }
+        }
+
+        if (!sound_count)
+        {
+            // Fill the remainder of the output buffer with silence, there are no more sounds to play.
+            ZeroMemory(output, (output_count + 1) * output_channels * sizeof(LK_S16));
+            break;
+        }
+
+        for (int channel_index = 0; channel_index < output_channels; channel_index++)
+        {
+            LK_S32 clamped = samples_sum[channel_index];
+            if (clamped < -32767) clamped = -32767;
+            if (clamped >  32767) clamped =  32767;
+
+            *(output++) = (LK_S16) clamped;
+        }
+    }
+
+
+    ReleaseMutex(mutex);
 }
 
 static DWORD lk_audio_thread(LPVOID parameter)
@@ -1586,6 +1761,19 @@ static void lk_initialize_audio()
 
     lk_private.audio.secondary_buffer = secondary_buffer;
 
+    if (lk_platform.audio.strategy == LK_AUDIO_MIXER)
+    {
+        HANDLE mutex = CreateMutex(0, 0, 0);
+        lk_private.audio.mixer_mutex = mutex;
+
+        if (!mutex)
+        {
+            /* @Incomplete - logging */
+            lk_platform.audio.strategy = LK_NO_AUDIO;
+            return;
+        }
+    }
+
     CreateThread(0, 0, lk_audio_thread, 0, 0, 0);
 }
 
@@ -1630,8 +1818,8 @@ static void lk_entry()
         lk_update_time_stamp();
         lk_private.client.frame(&lk_platform);
 
+        lk_mixer_synchronize();
         lk_window_update_title();
-
         lk_window_swap_buffers();
     }
 
