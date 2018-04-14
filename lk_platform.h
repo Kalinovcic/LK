@@ -180,7 +180,17 @@ enum
     LK_DEFAULT_POSITION = 0x80000000,
 };
 
-typedef struct
+typedef enum
+{
+    LK_NO_AUDIO,
+    LK_AUDIO_CALLBACK,
+    LK_AUDIO_MIXER,
+} LK_Audio_Strategy;
+
+struct LK_Platform_Structure;
+typedef void LK_Audio_Callback(struct LK_Platform_Structure* platform, LK_S16* samples);
+
+typedef struct LK_Platform_Structure
 {
     LK_B32 break_frame_loop;
     void* client_data;
@@ -190,7 +200,7 @@ typedef struct
         LK_B32 no_window;
         LK_Window_Backend backend;
 
-        char*  title;
+        char* title;
 
         // During initialization, x and y will be set to LK_DEFAULT_POSITION, width and height will be set to zero.
         // You may modify these to specify initial window coordinates or dimensions. Otherwise, the window will be
@@ -244,6 +254,17 @@ typedef struct
 
     struct
     {
+        LK_Audio_Strategy strategy;
+        LK_Audio_Callback* callback;
+        LK_B32 silent_when_not_focused;
+
+        LK_U32 channels;
+        LK_U32 frequency; // isn't affected by "channels", channels are sampled separately
+        LK_U32 sample_count;
+    } audio;
+
+    struct
+    {
         LK_U64 delta_ticks;
         LK_U64 delta_nanoseconds;
         LK_U64 delta_microseconds;
@@ -289,6 +310,7 @@ extern "C"
 
 
 #include <windows.h> // @Incomplete - get rid of this include
+#include <dsound.h> // @Incomplete - get rid of this include
 
 
 typedef LK_CLIENT_INIT(LK_Client_Init_Function);
@@ -308,8 +330,8 @@ typedef struct
     struct
     {
         FILETIME last_dll_write_time;
-        CHAR dll_path[MAX_PATH];      // @Incomplete - Never use MAX_PATH, because it's not correct for long file names!
-        CHAR temp_dll_path[MAX_PATH]; // @Incomplete - Never use MAX_PATH, because it's not correct for long file names!
+        CHAR dll_path[16384];      // @Incomplete - this is dumb and unsafe
+        CHAR temp_dll_path[16384]; // @Incomplete - this is dumb and unsafe
 
         HMODULE library;
         LK_Client_Init_Function* init;
@@ -321,6 +343,9 @@ typedef struct
     {
         HWND handle;
         HDC dc;
+
+        HANDLE main_fiber;
+        HANDLE message_fiber;
 
         LK_Window_Backend backend;
         BITMAPINFO bitmap_info;
@@ -347,6 +372,14 @@ typedef struct
         WGLCreateContextAttribsARB* wglCreateContextAttribsARB;
         WGLSwapIntervalEXT* wglSwapIntervalEXT;
     } opengl;
+
+    struct
+    {
+        LPDIRECTSOUNDBUFFER secondary_buffer;
+        LK_U32 secondary_buffer_size;
+        LK_U32 sample_buffer_size;
+        LK_U32 sample_buffer_count;
+    } audio;
 
     struct
     {
@@ -866,6 +899,23 @@ lk_window_callback(HWND window, UINT message, WPARAM wparam, LPARAM lparam)
         goto run_default_proc;
     } break;
 
+    case WM_TIMER:
+    {
+        SwitchToFiber(lk_private.window.main_fiber);
+    } break;
+
+    case WM_ENTERMENULOOP:
+    case WM_ENTERSIZEMOVE:
+    {
+        SetTimer(window, 0, 1, 0);
+    } break;
+
+    case WM_EXITMENULOOP:
+    case WM_EXITSIZEMOVE:
+    {
+        KillTimer(window, 0);
+    } break;
+
     default:
     {
         goto run_default_proc;
@@ -1191,6 +1241,21 @@ static void lk_close_window()
     lk_private.opengl.context = 0;
 }
 
+static void CALLBACK lk_message_fiber_proc(void* unused)
+{
+    while (1)
+    {
+        MSG message;
+        while (PeekMessageA(&message, 0, 0, 0, PM_REMOVE))
+        {
+            TranslateMessage(&message);
+            DispatchMessage(&message);
+        }
+
+        SwitchToFiber(lk_private.window.main_fiber);
+    }
+}
+
 static void lk_window_message_loop()
 {
     if (!lk_private.window.handle)
@@ -1208,12 +1273,7 @@ static void lk_window_message_loop()
 
     lk_push_window_data();
 
-    MSG message;
-    while (PeekMessageA(&message, 0, 0, 0, PM_REMOVE))
-    {
-        TranslateMessage(&message);
-        DispatchMessage(&message);
-    }
+    SwitchToFiber(lk_private.window.message_fiber);
 
     if (lk_private.window.backend == LK_WINDOW_CANVAS)
     {
@@ -1293,6 +1353,242 @@ static void lk_update_time_stamp()
     lk_platform.time.seconds      += lk_platform.time.delta_seconds;
 }
 
+static void lk_mixer_callback(LK_Platform* platform, LK_S16* samples)
+{
+    // @Incomplete
+    int count = lk_platform.audio.sample_count;
+    ZeroMemory(samples, count);
+}
+
+static DWORD lk_audio_thread(LPVOID parameter)
+{
+    LPDIRECTSOUNDBUFFER secondary_buffer = lk_private.audio.secondary_buffer;
+
+    LK_Audio_Callback* callback;
+    LK_Audio_Strategy strategy = lk_platform.audio.strategy;
+    if (lk_platform.audio.strategy == LK_AUDIO_CALLBACK)
+    {
+        callback = lk_platform.audio.callback;
+        if (!callback)
+        {
+            /* @Incomplete - logging */
+            callback = lk_mixer_callback;
+        }
+    }
+    else if (lk_platform.audio.strategy == LK_AUDIO_MIXER)
+    {
+        callback = lk_mixer_callback;
+    }
+    else
+    {
+        /* @Incomplete - logging */
+        callback = lk_mixer_callback;
+    }
+
+    LK_U32 channels = lk_platform.audio.channels;
+    LK_U32 sample_buffer_size = lk_private.audio.sample_buffer_size;
+    LK_U32 sample_buffer_count = lk_private.audio.sample_buffer_count;
+
+    int playing = 0;
+
+    int last_buffer_index = -1;
+    while (1)
+    {
+        DWORD play_cursor;
+        DWORD write_cursor;
+        if (!SUCCEEDED(IDirectSoundBuffer_GetCurrentPosition(secondary_buffer, &play_cursor, &write_cursor)))
+        {
+            /* @Incomplete - logging */
+        }
+
+        LK_U32 buffer_index = (write_cursor / sample_buffer_size) + 1;
+        buffer_index %= sample_buffer_count;
+
+        if (buffer_index == last_buffer_index)
+        {
+            Sleep(1);
+            continue;
+        }
+
+        LK_U32 expected_buffer_index = (last_buffer_index + 1) % sample_buffer_count;
+        if (buffer_index != expected_buffer_index)
+        {
+            /* @Incomplete - logging, missed a buffer */
+        }
+
+        last_buffer_index = buffer_index;
+
+
+        write_cursor = buffer_index * sample_buffer_size;
+
+        LK_S16* buffer;
+        DWORD buffer_size;
+        if (SUCCEEDED(IDirectSoundBuffer_Lock(secondary_buffer, write_cursor, sample_buffer_size, &buffer, &buffer_size, 0, 0, 0)))
+        {
+            callback(&lk_platform, buffer);
+            IDirectSoundBuffer_Unlock(secondary_buffer, buffer, buffer_size, 0, 0);
+        }
+
+        if (!playing)
+        {
+            if (!SUCCEEDED(IDirectSoundBuffer_Play(secondary_buffer, 0, 0, DSBPLAY_LOOPING)))
+            {
+                /* @Incomplete - logging */
+            }
+
+            playing = 1;
+        }
+    }
+}
+
+static void lk_initialize_audio()
+{
+    if (lk_platform.window.no_window)
+    {
+        /* @Incomplete - logging */
+        lk_platform.audio.strategy = LK_NO_AUDIO;
+        return;
+    }
+
+
+    HMODULE dsound = LoadLibraryA("dsound.dll");
+    if (!dsound)
+    {
+        /* @Incomplete - logging */
+        lk_platform.audio.strategy = LK_NO_AUDIO;
+        return;
+    }
+
+    typedef HRESULT WINAPI LK_DirectSoundCreate(LPGUID, LPDIRECTSOUND*, LPUNKNOWN);
+    LK_DirectSoundCreate* direct_sound_create;
+
+    direct_sound_create = (LK_DirectSoundCreate*) GetProcAddress(dsound, "DirectSoundCreate");
+    if (!direct_sound_create)
+    {
+        /* @Incomplete - logging */
+        lk_platform.audio.strategy = LK_NO_AUDIO;
+        return;
+    }
+
+    LPDIRECTSOUND direct_sound;
+    if (!SUCCEEDED(direct_sound_create(0, &direct_sound, 0)))
+    {
+        /* @Incomplete - logging */
+        lk_platform.audio.strategy = LK_NO_AUDIO;
+        return;
+    }
+
+    HWND window = lk_private.window.handle;
+    if (!SUCCEEDED(IDirectSound_SetCooperativeLevel(direct_sound, window, DSSCL_PRIORITY)))
+    {
+        /* @Incomplete - logging */
+        lk_platform.audio.strategy = LK_NO_AUDIO;
+        return;
+    }
+
+
+    LK_U32 frequency = lk_platform.audio.frequency;
+    if (!frequency)
+    {
+        frequency = 44100;
+        lk_platform.audio.frequency = frequency;
+    }
+
+    LK_U32 channels = lk_platform.audio.channels;
+    if (!channels)
+    {
+        channels = 2;
+        lk_platform.audio.channels = channels;
+    }
+
+    LK_U32 sample_count = lk_platform.audio.sample_count;
+    if (!sample_count)
+    {
+        sample_count = 2048;
+        lk_platform.audio.sample_count = sample_count;
+    }
+
+    LK_U32 sample_buffer_size = sample_count * channels * 2;
+    lk_private.audio.sample_buffer_size = sample_buffer_size;
+
+
+    WAVEFORMATEX format;
+    ZeroMemory(&format, sizeof(format));
+    format.wFormatTag = WAVE_FORMAT_PCM;
+    format.nChannels = channels;
+    format.nSamplesPerSec = frequency;
+    format.wBitsPerSample = 16;
+    format.nBlockAlign = (channels * format.wBitsPerSample) / 8;
+    format.nAvgBytesPerSec = format.nSamplesPerSec * format.nBlockAlign;
+    format.cbSize = 0;
+
+    LPDIRECTSOUNDBUFFER primary_buffer;
+    {
+        DSBUFFERDESC description;
+        ZeroMemory(&description, sizeof(description));
+        description.dwSize = sizeof(description);
+        description.dwFlags = DSBCAPS_PRIMARYBUFFER;
+
+        if (!SUCCEEDED(IDirectSound_CreateSoundBuffer(direct_sound, &description, &primary_buffer, 0)))
+        {
+            /* @Incomplete - logging */
+            lk_platform.audio.strategy = LK_NO_AUDIO;
+            return;
+        }
+
+        if (!SUCCEEDED(IDirectSoundBuffer_SetFormat(primary_buffer, &format)))
+        {
+            /* @Incomplete - logging */
+            lk_platform.audio.strategy = LK_NO_AUDIO;
+            return;
+        }
+    }
+
+    LPDIRECTSOUNDBUFFER secondary_buffer;
+    {
+        LK_U32 bytes_per_second = frequency * channels * 2;
+        LK_U32 sample_buffer_count = (bytes_per_second + sample_buffer_size - 1) / sample_buffer_size;
+        lk_private.audio.sample_buffer_count = sample_buffer_count;
+
+        LK_U32 secondary_buffer_size = sample_buffer_count * sample_buffer_size;
+        lk_private.audio.secondary_buffer_size = secondary_buffer_size;
+
+        DSBUFFERDESC description;
+        ZeroMemory(&description, sizeof(description));
+        description.dwSize = sizeof(description);
+        description.dwFlags = lk_platform.audio.silent_when_not_focused ? 0 : DSBCAPS_GLOBALFOCUS;
+        description.dwBufferBytes = secondary_buffer_size;
+        description.lpwfxFormat = &format;
+
+        if (!SUCCEEDED(IDirectSound_CreateSoundBuffer(direct_sound, &description, &secondary_buffer, 0)))
+        {
+            /* @Incomplete - logging */
+            lk_platform.audio.strategy = LK_NO_AUDIO;
+            return;
+        }
+
+        void* buffer1;
+        void* buffer2;
+        DWORD buffer1_size;
+        DWORD buffer2_size;
+        if (SUCCEEDED(IDirectSoundBuffer_Lock(secondary_buffer, 0, secondary_buffer_size, &buffer1, &buffer1_size, &buffer2, &buffer2_size, 0)))
+        {
+            // fill the buffer with silence
+            ZeroMemory(buffer1, buffer1_size);
+            ZeroMemory(buffer2, buffer2_size);
+
+            if (!SUCCEEDED(IDirectSoundBuffer_Unlock(secondary_buffer, buffer1, buffer1_size, buffer2, buffer2_size)))
+            {
+                /* @Incomplete - logging */
+            }
+        }
+    }
+
+    lk_private.audio.secondary_buffer = secondary_buffer;
+
+    CreateThread(0, 0, lk_audio_thread, 0, 0, 0);
+}
+
 static void lk_entry()
 {
     lk_get_dll_paths();
@@ -1310,7 +1606,15 @@ static void lk_entry()
 
     if (!lk_platform.window.no_window)
     {
+        lk_private.window.main_fiber = ConvertThreadToFiber(0);
+        lk_private.window.message_fiber = CreateFiber(0, lk_message_fiber_proc, 0);
+
         lk_open_window();
+    }
+
+    if (lk_platform.audio.strategy != LK_NO_AUDIO)
+    {
+        lk_initialize_audio();
     }
 
     while (!lk_platform.break_frame_loop)
