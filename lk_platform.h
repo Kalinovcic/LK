@@ -28,10 +28,6 @@ DOCUMENTATION
 #define LK_CLIENT_EXPORT __declspec(dllexport)
 #endif
 
-#define LK_CLIENT_INIT(name) void __cdecl name(LK_Platform* platform)
-#define LK_CLIENT_CLOSE(name) void __cdecl name(LK_Platform* platform)
-#define LK_CLIENT_FRAME(name) void __cdecl name(LK_Platform* platform)
-
 #ifdef __cplusplus
 extern "C"
 {
@@ -187,9 +183,6 @@ typedef enum
     LK_AUDIO_MIXER,
 } LK_Audio_Strategy;
 
-struct LK_Platform_Structure;
-typedef void LK_Audio_Callback(struct LK_Platform_Structure* platform, LK_S16* samples);
-
 typedef struct
 {
     LK_S16* samples;
@@ -233,9 +226,11 @@ typedef struct LK_Platform_Structure
         LK_U32 width;
         LK_U32 height;
 
+        LK_B32 fullscreen;
         LK_B32 forbid_resizing;
         LK_B32 undecorated;
         LK_B32 invisible;
+        LK_B32 disable_animations;
     } window;
 
     struct
@@ -276,7 +271,6 @@ typedef struct LK_Platform_Structure
     struct
     {
         LK_Audio_Strategy strategy;
-        LK_Audio_Callback* callback;
         LK_B32 silent_when_not_focused;
 
         LK_U32 channels;
@@ -334,11 +328,13 @@ extern "C"
 
 #include <windows.h> // @Incomplete - get rid of this include
 #include <dsound.h> // @Incomplete - get rid of this include
+#include <dwmapi.h> // @Incomplete - get rid of this include
 
 
-typedef LK_CLIENT_INIT(LK_Client_Init_Function);
-typedef LK_CLIENT_CLOSE(LK_Client_Close_Function);
-typedef LK_CLIENT_FRAME(LK_Client_Frame_Function);
+typedef void LK_Client_Init_Function(LK_Platform* platform);
+typedef void LK_Client_Close_Function(LK_Platform* platform);
+typedef void LK_Client_Frame_Function(LK_Platform* platform);
+typedef void LK_Client_Audio_Function(LK_Platform* platform, LK_S16* samples);
 
 typedef HGLRC WGLCreateContextAttribsARB(HDC hDC, HGLRC hShareContext, const int* attribList);
 typedef BOOL WGLSwapIntervalEXT(int interval);
@@ -363,8 +359,8 @@ typedef struct
     LK_B32 loop;
     LK_F32 volume;
 
-    LK_F32 cursor;
-    LK_F32 cursor_step;
+    LK_F64 cursor;
+    LK_F64 cursor_step;
 } LK_Playing_Sound;
 
 typedef struct
@@ -379,6 +375,7 @@ typedef struct
         LK_Client_Init_Function* init;
         LK_Client_Close_Function* close;
         LK_Client_Frame_Function* frame;
+        LK_Client_Audio_Function* audio;
     } client;
 
     struct
@@ -397,6 +394,12 @@ typedef struct
         LK_U32 width;
         LK_U32 height;
 
+        LK_S32 x_before_fullscreen;
+        LK_S32 y_before_fullscreen;
+        LK_U32 width_before_fullscreen;
+        LK_U32 height_before_fullscreen;
+
+        LK_B32 fullscreen;
         LK_B32 forbid_resizing;
         LK_B32 undecorated;
         LK_B32 invisible;
@@ -441,9 +444,14 @@ static LK_Platform lk_platform;
 static LK_Platform_Private lk_private;
 
 
-static LK_CLIENT_INIT(lk_client_init_stub) {}
-static LK_CLIENT_FRAME(lk_client_frame_stub) {}
-static LK_CLIENT_CLOSE(lk_client_close_stub) {}
+static void lk_client_init_stub(LK_Platform* platform) {}
+static void lk_client_frame_stub(LK_Platform* platform) {}
+static void lk_client_close_stub(LK_Platform* platform) {}
+
+static void lk_client_audio_stub(LK_Platform* platform, LK_S16* samples)
+{
+    ZeroMemory(samples, platform->audio.sample_count * platform->audio.channels * 2);
+}
 
 static void lk_get_dll_paths()
 {
@@ -511,6 +519,7 @@ static void lk_load_client()
         LK_GetClientFunction(lk_private.client.init,  LK_Client_Init_Function,  lk_client_init);
         LK_GetClientFunction(lk_private.client.close, LK_Client_Close_Function, lk_client_close);
         LK_GetClientFunction(lk_private.client.frame, LK_Client_Frame_Function, lk_client_frame);
+        LK_GetClientFunction(lk_private.client.audio, LK_Client_Audio_Function, lk_client_audio);
 
         #undef LK_GetClientFunction
     }
@@ -533,24 +542,17 @@ static void lk_unload_client()
     }
 }
 
-static void lk_window_update_title()
-{
-    HWND window = lk_private.window.handle;
-    SetWindowTextA(window, lk_platform.window.title);
-}
-
-static LONG lk_apply_window_style(LONG old_style)
+static LONG lk_apply_window_style(LONG old_style, LK_B32 ignore_fullscreen)
 {
     LONG resizable_flags = WS_THICKFRAME | WS_MAXIMIZEBOX;
     LONG decoration_flags = WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
 
-    LONG style = old_style & ~(resizable_flags | decoration_flags);
+    LONG style = old_style & ~(resizable_flags | decoration_flags | WS_POPUP);
 
-    if (!lk_platform.window.undecorated)
+    LK_B32 fullscreen = lk_platform.window.fullscreen && !ignore_fullscreen;
+    if (!lk_platform.window.undecorated && !fullscreen)
     {
         style |= decoration_flags;
-        style &= ~WS_POPUP;
-
         if (!lk_platform.window.forbid_resizing)
         {
             style |= resizable_flags;
@@ -568,28 +570,50 @@ static void lk_push_window_data()
 {
     HWND window = lk_private.window.handle;
 
-    int force_resize = 0;
-
-    if (lk_private.window.undecorated != lk_platform.window.undecorated ||
-        lk_private.window.forbid_resizing != lk_platform.window.forbid_resizing)
+    LK_B32 toggle_fullscreen = (lk_private.window.fullscreen != lk_platform.window.fullscreen);
+    if (toggle_fullscreen)
     {
-        LONG style = GetWindowLong(window, GWL_STYLE);
-        style = lk_apply_window_style(style);
-        SetWindowLong(window, GWL_STYLE, style);
+        // remember/restore where the window was before it was toggled to fullscreen
+        if (lk_platform.window.fullscreen)
+        {
+            lk_private.window.x_before_fullscreen = lk_platform.window.x;
+            lk_private.window.y_before_fullscreen = lk_platform.window.y;
+            lk_private.window.width_before_fullscreen = lk_platform.window.width;
+            lk_private.window.height_before_fullscreen = lk_platform.window.height;
 
-        lk_private.window.undecorated = lk_platform.window.undecorated;
-        lk_private.window.forbid_resizing = lk_platform.window.forbid_resizing;
-        force_resize = 1;
+            HMONITOR monitor = MonitorFromWindow(window, MONITOR_DEFAULTTOPRIMARY);
+            MONITORINFO monitor_info;
+            monitor_info.cbSize = sizeof(monitor_info);
+            GetMonitorInfo(monitor, &monitor_info);
+
+            lk_platform.window.x = monitor_info.rcMonitor.left;
+            lk_platform.window.y = monitor_info.rcMonitor.top;
+            lk_platform.window.width = monitor_info.rcMonitor.right - monitor_info.rcMonitor.left;
+            lk_platform.window.height = monitor_info.rcMonitor.bottom - monitor_info.rcMonitor.top;
+        }
+        else
+        {
+            lk_platform.window.x = lk_private.window.x_before_fullscreen;
+            lk_platform.window.y = lk_private.window.y_before_fullscreen;
+            lk_platform.window.width = lk_private.window.width_before_fullscreen;
+            lk_platform.window.height = lk_private.window.height_before_fullscreen;
+        }
     }
 
-    if ((lk_private.window.width  != lk_platform.window.width ) ||
-        (lk_private.window.height != lk_platform.window.height) ||
-        (lk_private.window.x      != lk_platform.window.x     ) ||
-        (lk_private.window.y      != lk_platform.window.y     ) ||
-        force_resize)
+    if (toggle_fullscreen ||
+        (lk_private.window.x               != lk_platform.window.x              ) ||
+        (lk_private.window.y               != lk_platform.window.y              ) ||
+        (lk_private.window.width           != lk_platform.window.width          ) ||
+        (lk_private.window.height          != lk_platform.window.height         ) ||
+        (lk_private.window.forbid_resizing != lk_platform.window.forbid_resizing) ||
+        (lk_private.window.undecorated     != lk_platform.window.undecorated    ) ||
+        (lk_private.window.invisible       != lk_platform.window.invisible      ))
     {
         LONG style = GetWindowLong(window, GWL_STYLE);
         LONG extended_style = GetWindowLong(window, GWL_EXSTYLE);
+
+        style = lk_apply_window_style(style, 0);
+        SetWindowLong(window, GWL_STYLE, style);
 
         // client dimensions to window dimensions
         LK_U32 width = lk_platform.window.width;
@@ -609,15 +633,45 @@ static void lk_push_window_data()
         LK_S32 x = lk_platform.window.x + window_bounds.left;
         LK_S32 y = lk_platform.window.y + window_bounds.top;
 
-        MoveWindow(window, x, y, width, height, 0);
-    }
 
-    if (lk_private.window.invisible != lk_platform.window.invisible)
-    {
+        UINT swp_flags = SWP_NOOWNERZORDER | SWP_FRAMECHANGED;
+        if (!toggle_fullscreen) swp_flags |= SWP_NOZORDER;
+        SetWindowPos(window, HWND_TOP, x, y, width, height, swp_flags);
         ShowWindow(window, lk_platform.window.invisible ? SW_HIDE : SW_SHOW);
+
+        lk_private.window.fullscreen = lk_platform.window.fullscreen;
+        lk_private.window.forbid_resizing = lk_platform.window.forbid_resizing;
+        lk_private.window.undecorated = lk_platform.window.undecorated;
         lk_private.window.invisible = lk_platform.window.invisible;
     }
 }
+
+static void lk_window_update_title()
+{
+    HWND window = lk_private.window.handle;
+    SetWindowTextA(window, lk_platform.window.title);
+}
+
+static void lk_push()
+{
+    HWND window = lk_private.window.handle;
+    if (!window)
+    {
+        return;
+    }
+
+    lk_platform.mouse.delta_x = 0;
+    lk_platform.mouse.delta_y = 0;
+    lk_platform.mouse.delta_wheel = 0;
+
+    lk_private.keyboard.text_size = 0;
+    lk_private.keyboard.text_buffer[0] = 0;
+    lk_platform.keyboard.text = lk_private.keyboard.text_buffer;
+
+    lk_push_window_data();
+    lk_window_update_title();
+}
+
 
 static void lk_pull_window_data()
 {
@@ -695,6 +749,42 @@ static void lk_update_canvas()
     }
 }
 
+static void lk_pull()
+{
+    HWND window = lk_private.window.handle;
+    if (!window)
+    {
+        return;
+    }
+
+    lk_pull_window_data();
+    lk_pull_mouse_data();
+
+    lk_update_digital_button(&lk_platform.mouse.left_button);
+    lk_update_digital_button(&lk_platform.mouse.right_button);
+
+    for (int key_index = 0; key_index < LK__KEY_COUNT; key_index++)
+    {
+        LK_Digital_Button* button = lk_platform.keyboard.state + key_index;
+        lk_update_digital_button(button);
+    }
+
+    if (lk_private.window.backend == LK_WINDOW_CANVAS)
+    {
+        lk_update_canvas();
+    }
+}
+
+
+static void lk_update_swap_interval()
+{
+    if (lk_private.opengl.wglSwapIntervalEXT)
+    {
+        int interval = lk_platform.opengl.swap_interval;
+        lk_private.opengl.wglSwapIntervalEXT(interval);
+    }
+}
+
 static void lk_repaint_canvas_rectangle(HDC device_context, int x, int y, int width, int height)
 {
     if (!lk_platform.canvas.data)
@@ -717,6 +807,7 @@ static void lk_repaint_canvas_rectangle(HDC device_context, int x, int y, int wi
         pixels, info,
         DIB_RGB_COLORS, SRCCOPY);
 }
+
 
 static LRESULT CALLBACK
 lk_window_callback(HWND window, UINT message, WPARAM wparam, LPARAM lparam)
@@ -973,12 +1064,109 @@ run_default_proc:
     return DefWindowProcW(window, message, wparam, lparam);
 }
 
-static void lk_update_swap_interval()
+static void lk_fill_default_window_settings(HINSTANCE instance)
 {
-    if (lk_private.opengl.wglSwapIntervalEXT)
+    if (!lk_platform.window.title)
     {
-        int interval = lk_platform.opengl.swap_interval;
-        lk_private.opengl.wglSwapIntervalEXT(interval);
+        lk_platform.window.title = "app";
+    }
+
+
+    LK_B32 default_x      = (lk_platform.window.x == LK_DEFAULT_POSITION);
+    LK_B32 default_y      = (lk_platform.window.y == LK_DEFAULT_POSITION);
+    LK_B32 default_width  = !lk_platform.window.width;
+    LK_B32 default_height = !lk_platform.window.height;
+
+    LK_B32 default_position = default_x || default_y;
+    LK_B32 default_size = default_width || default_height;
+
+    if (!default_position && !default_size)
+    {
+        return;
+    }
+
+    if (default_size)
+    {
+        RECT client_rect;
+        client_rect.left = 0;
+        client_rect.top = 0;
+        client_rect.right = 600;
+        client_rect.bottom = 600;
+
+        HWND temp_window = CreateWindowExW(0, LK_WINDOW_CLASS_NAME, L"", 0, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, 0, 0, instance, 0);
+        if (temp_window)
+        {
+            GetClientRect(temp_window, &client_rect);
+            DestroyWindow(temp_window);
+        }
+        else
+        {
+            /* @Incomplete - logging */
+        }
+
+        LK_U32 width = client_rect.right - client_rect.left;
+        LK_U32 height = client_rect.bottom - client_rect.top;
+
+        if (default_width) lk_platform.window.width = width;
+        if (default_height) lk_platform.window.height = height;
+    }
+
+    if (default_position)
+    {
+        int x = 100;
+        int y = 100;
+
+        HMONITOR monitor = MonitorFromWindow(0, MONITOR_DEFAULTTOPRIMARY);
+        MONITORINFO monitor_info;
+        monitor_info.cbSize = sizeof(monitor_info);
+        if (GetMonitorInfo(monitor, &monitor_info))
+        {
+            int width = lk_platform.window.width;
+            int height = lk_platform.window.height;
+
+            RECT window_bounds;
+            window_bounds.left = 0;
+            window_bounds.top = 0;
+            window_bounds.right = width;
+            window_bounds.bottom = height;
+            AdjustWindowRectEx(&window_bounds, WS_OVERLAPPED, 0, 0);
+
+            width = window_bounds.right - window_bounds.left;
+            height = window_bounds.bottom - window_bounds.top;
+
+            x = (monitor_info.rcWork.left + monitor_info.rcWork.right - width) / 2;
+            y = (monitor_info.rcWork.top + monitor_info.rcWork.bottom - height) / 2;
+        }
+        else
+        {
+            /* @Incomplete - logging */
+        }
+
+        if (default_x) lk_platform.window.x = x;
+        if (default_y) lk_platform.window.y = y;
+    }
+}
+
+static void lk_disable_window_animations(HWND window)
+{
+    HMODULE dwmapi = LoadLibraryA("dwmapi.dll");
+    if (dwmapi)
+    {
+        typedef HRESULT LK_DwmSetWindowAttribute(HWND, DWORD, LPCVOID, DWORD);
+        LK_DwmSetWindowAttribute* DwmSetWindowAttribute;
+
+        DwmSetWindowAttribute = (LK_DwmSetWindowAttribute*) GetProcAddress(dwmapi, "DwmSetWindowAttribute");
+        if (DwmSetWindowAttribute)
+        {
+            BOOL disable = TRUE;
+            DwmSetWindowAttribute(window, DWMWA_TRANSITIONS_FORCEDISABLED, &disable, sizeof(disable));
+        }
+
+        FreeLibrary(dwmapi);
+    }
+    else
+    {
+        /* @Incomplete - logging */
     }
 }
 
@@ -1001,64 +1189,11 @@ static void lk_open_window()
         return;
     }
 
-    DWORD extended_style = 0;
-    DWORD style = lk_apply_window_style(0);
+    lk_fill_default_window_settings(instance);
 
-    // adjust window size if specified (client size to window size)
-    int width = CW_USEDEFAULT;
-    int height = CW_USEDEFAULT;
-    if (lk_platform.window.width || lk_platform.window.height)
-    {
-        width = lk_platform.window.width;
-        height = lk_platform.window.height;
-
-        RECT window_bounds;
-        window_bounds.left = 0;
-        window_bounds.top = 0;
-        window_bounds.right = width;
-        window_bounds.bottom = height;
-        AdjustWindowRectEx(&window_bounds, style, 0, extended_style);
-
-        width = (window_bounds.right - window_bounds.left);
-        height = (window_bounds.bottom - window_bounds.top);
-    }
-
-    int x = lk_platform.window.x;
-    int y = lk_platform.window.y;
-
-    if (x == LK_DEFAULT_POSITION || y == LK_DEFAULT_POSITION)
-    {
-        // try to position the window on the center of the primary monitor
-        x = CW_USEDEFAULT;
-        y = CW_USEDEFAULT;
-
-        HMONITOR primary_monitor = MonitorFromWindow(0, MONITOR_DEFAULTTOPRIMARY);
-        MONITORINFO primary_monitor_info;
-        primary_monitor_info.cbSize = sizeof(MONITORINFO);
-
-        if (GetMonitorInfo(primary_monitor, &primary_monitor_info))
-        {
-            x = (primary_monitor_info.rcWork.left + primary_monitor_info.rcWork.right  - width ) / 2;
-            y = (primary_monitor_info.rcWork.top  + primary_monitor_info.rcWork.bottom - height) / 2;
-        }
-    }
-    else
-    {
-        RECT window_bounds;
-        window_bounds.left = 0;
-        window_bounds.top = 0;
-        window_bounds.right = 0;
-        window_bounds.bottom = 0;
-        AdjustWindowRectEx(&window_bounds, style, 0, extended_style);
-
-        x += window_bounds.left;
-        y += window_bounds.top;
-    }
-
-
-
-    HWND window_handle = CreateWindowExW(extended_style, window_class.lpszClassName, L"", style,
-                                         x, y, width, height, 0, 0, instance, 0);
+    HWND window_handle = CreateWindowExW(0, LK_WINDOW_CLASS_NAME, L"", 0,
+                                         CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT,
+                                         0, 0, instance, 0);
 
     if (!window_handle)
     {
@@ -1066,26 +1201,14 @@ static void lk_open_window()
         return;
     }
 
+    if (lk_platform.window.disable_animations)
+    {
+        lk_disable_window_animations(window_handle);
+    }
+
 
     lk_private.window.handle = window_handle;
-
-
-    if (!lk_platform.window.title)
-    {
-        lk_platform.window.title = "app";
-    }
-
-    SetWindowTextA(window_handle, lk_platform.window.title);
-
-    if (!lk_platform.window.invisible)
-    {
-        ShowWindow(window_handle, SW_SHOW);
-    }
-
-
-    lk_private.window.undecorated = lk_platform.window.undecorated;
-    lk_private.window.forbid_resizing = lk_platform.window.forbid_resizing;
-    lk_private.window.invisible = lk_platform.window.invisible;
+    lk_push();
 
     SetForegroundWindow(window_handle);
     SetFocus(window_handle);
@@ -1227,8 +1350,7 @@ static void lk_open_window()
         }
     }
 
-    lk_pull_window_data();
-    lk_pull_mouse_data();
+    lk_pull();
     lk_update_canvas();
     lk_update_swap_interval();
 
@@ -1288,6 +1410,8 @@ static void lk_close_window()
 
 static void CALLBACK lk_message_fiber_proc(void* unused)
 {
+    HANDLE main_fiber = lk_private.window.main_fiber;
+
     while (1)
     {
         MSG message;
@@ -1297,45 +1421,20 @@ static void CALLBACK lk_message_fiber_proc(void* unused)
             DispatchMessage(&message);
         }
 
-        SwitchToFiber(lk_private.window.main_fiber);
+        SwitchToFiber(main_fiber);
     }
 }
 
 static void lk_window_message_loop()
 {
-    if (!lk_private.window.handle)
+    HWND window = lk_private.window.handle;
+    if (!window)
     {
         return;
     }
 
-    lk_platform.mouse.delta_x = 0;
-    lk_platform.mouse.delta_y = 0;
-    lk_platform.mouse.delta_wheel = 0;
-
-    lk_private.keyboard.text_size = 0;
-    lk_private.keyboard.text_buffer[0] = 0;
-    lk_platform.keyboard.text = lk_private.keyboard.text_buffer;
-
-    lk_push_window_data();
-
-    SwitchToFiber(lk_private.window.message_fiber);
-
-    if (lk_private.window.backend == LK_WINDOW_CANVAS)
-    {
-        lk_update_canvas();
-    }
-
-    lk_pull_window_data();
-    lk_pull_mouse_data();
-
-    lk_update_digital_button(&lk_platform.mouse.left_button);
-    lk_update_digital_button(&lk_platform.mouse.right_button);
-
-    for (int key_index = 0; key_index < LK__KEY_COUNT; key_index++)
-    {
-        LK_Digital_Button* button = lk_platform.keyboard.state + key_index;
-        lk_update_digital_button(button);
-    }
+    HANDLE message_fiber = lk_private.window.message_fiber;
+    SwitchToFiber(message_fiber);
 }
 
 static void lk_window_swap_buffers()
@@ -1389,7 +1488,7 @@ static void lk_update_time_stamp()
     lk_platform.time.delta_milliseconds = milliseconds_ticks / frequency;
     lk_private.time.unprocessed_milliseconds = milliseconds_ticks % frequency;
 
-    lk_platform.time.delta_seconds = (double) delta_ticks / (double) frequency;
+    lk_platform.time.delta_seconds = (LK_F64) delta_ticks / (LK_F64) frequency;
 
     lk_platform.time.ticks        += delta_ticks;
     lk_platform.time.nanoseconds  += lk_platform.time.delta_nanoseconds;
@@ -1400,7 +1499,12 @@ static void lk_update_time_stamp()
 
 static void lk_mixer_synchronize()
 {
-    float playing_frequency = (float) lk_platform.audio.frequency;
+    if (lk_platform.audio.strategy != LK_AUDIO_MIXER)
+    {
+        return;
+    }
+
+    LK_F64 playing_frequency = (LK_F64) lk_platform.audio.frequency;
 
     HANDLE mutex = lk_private.audio.mixer_mutex;
     WaitForSingleObject(mutex, INFINITE);
@@ -1453,7 +1557,7 @@ static void lk_mixer_synchronize()
     ReleaseMutex(mutex);
 }
 
-static void lk_mixer_callback(LK_Platform* unused, LK_S16* output)
+static void lk_mix(LK_Platform* unused, LK_S16* output)
 {
     HANDLE mutex = lk_private.audio.mixer_mutex;
     WaitForSingleObject(mutex, INFINITE);
@@ -1539,27 +1643,7 @@ static DWORD lk_audio_thread(LPVOID parameter)
 {
     LPDIRECTSOUNDBUFFER secondary_buffer = lk_private.audio.secondary_buffer;
 
-    LK_Audio_Callback* callback;
     LK_Audio_Strategy strategy = lk_platform.audio.strategy;
-    if (lk_platform.audio.strategy == LK_AUDIO_CALLBACK)
-    {
-        callback = lk_platform.audio.callback;
-        if (!callback)
-        {
-            /* @Incomplete - logging */
-            callback = lk_mixer_callback;
-        }
-    }
-    else if (lk_platform.audio.strategy == LK_AUDIO_MIXER)
-    {
-        callback = lk_mixer_callback;
-    }
-    else
-    {
-        /* @Incomplete - logging */
-        callback = lk_mixer_callback;
-    }
-
     LK_U32 channels = lk_platform.audio.channels;
     LK_U32 sample_buffer_size = lk_private.audio.sample_buffer_size;
     LK_U32 sample_buffer_count = lk_private.audio.sample_buffer_count;
@@ -1600,7 +1684,20 @@ static DWORD lk_audio_thread(LPVOID parameter)
         DWORD buffer_size;
         if (SUCCEEDED(IDirectSoundBuffer_Lock(secondary_buffer, write_cursor, sample_buffer_size, &buffer, &buffer_size, 0, 0, 0)))
         {
-            callback(&lk_platform, buffer);
+            if (strategy == LK_AUDIO_CALLBACK)
+            {
+                lk_private.client.audio(&lk_platform, buffer);
+            }
+            else
+            {
+                if (strategy != LK_AUDIO_MIXER)
+                {
+                    /* @Incomplete - logging */
+                }
+
+                lk_mix(&lk_platform, buffer);
+            }
+
             IDirectSoundBuffer_Unlock(secondary_buffer, buffer, buffer_size, 0, 0);
         }
 
@@ -1813,13 +1910,14 @@ static void lk_entry()
             lk_load_client();
         }
 
+        lk_push();
         lk_window_message_loop();
+        lk_pull();
 
         lk_update_time_stamp();
         lk_private.client.frame(&lk_platform);
 
         lk_mixer_synchronize();
-        lk_window_update_title();
         lk_window_swap_buffers();
     }
 
