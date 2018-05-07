@@ -266,6 +266,11 @@ typedef struct LK_Platform_Structure
         LK_B32 compatibility_context;
 
         LK_U32 swap_interval;
+
+        LK_U32 color_bits;
+        LK_U32 depth_bits;
+        LK_U32 stencil_bits;
+        LK_U32 sample_count;
     } opengl;
 
     struct
@@ -294,6 +299,12 @@ typedef struct LK_Platform_Structure
         LK_U64 milliseconds;
         LK_F64 seconds;
     } time;
+
+    struct
+    {
+        int argument_count;
+        char** arguments;
+    } command_line;
 } LK_Platform;
 
 #ifdef __cplusplus
@@ -336,6 +347,7 @@ typedef void LK_Client_Close_Function(LK_Platform* platform);
 typedef void LK_Client_Frame_Function(LK_Platform* platform);
 typedef void LK_Client_Audio_Function(LK_Platform* platform, LK_S16* samples);
 
+typedef BOOL WGLChoosePixelFormatARB(HDC hdc, const int *piAttribIList, const FLOAT *pfAttribFList, UINT nMaxFormats, int *piFormats, UINT *nNumFormats);
 typedef HGLRC WGLCreateContextAttribsARB(HDC hDC, HGLRC hShareContext, const int* attribList);
 typedef BOOL WGLSwapIntervalEXT(int interval);
 
@@ -414,6 +426,7 @@ typedef struct
     struct
     {
         HGLRC context;
+        WGLChoosePixelFormatARB* wglChoosePixelFormatARB;
         WGLCreateContextAttribsARB* wglCreateContextAttribsARB;
         WGLSwapIntervalEXT* wglSwapIntervalEXT;
     } opengl;
@@ -1170,6 +1183,275 @@ static void lk_disable_window_animations(HWND window)
     }
 }
 
+static void lk_create_legacy_opengl_context(HINSTANCE instance)
+{
+    HWND window = lk_private.window.handle;
+    HDC dc = lk_private.window.dc;
+
+    PIXELFORMATDESCRIPTOR pixel_format_desc;
+    ZeroMemory(&pixel_format_desc, sizeof(PIXELFORMATDESCRIPTOR));
+    pixel_format_desc.nSize = sizeof(PIXELFORMATDESCRIPTOR);
+    pixel_format_desc.nVersion = 1;
+    pixel_format_desc.dwFlags = PFD_DRAW_TO_WINDOW | PFD_SUPPORT_OPENGL | PFD_DOUBLEBUFFER;
+    pixel_format_desc.iPixelType = PFD_TYPE_RGBA;
+    pixel_format_desc.cColorBits = lk_platform.opengl.color_bits;
+    pixel_format_desc.cDepthBits = lk_platform.opengl.depth_bits;
+    pixel_format_desc.cStencilBits = lk_platform.opengl.stencil_bits;
+    pixel_format_desc.iLayerType = PFD_MAIN_PLANE;
+
+    int pixel_format = ChoosePixelFormat(dc, &pixel_format_desc);
+    if (pixel_format == 0)
+    {
+        /* @Incomplete - logging */
+        return;
+    }
+
+    if (!SetPixelFormat(dc, pixel_format, &pixel_format_desc))
+    {
+        /* @Incomplete - logging */
+        return;
+    }
+
+    HGLRC context = wglCreateContext(dc);
+
+    if (!context)
+    {
+        /* @Incomplete - logging */
+        return;
+    }
+
+    if (!wglMakeCurrent(dc, context))
+    {
+        /* @Incomplete - logging */
+        wglDeleteContext(context);
+        return;
+    }
+
+    lk_private.opengl.context = context;
+}
+
+static int lk_create_modern_opengl_context(HINSTANCE instance)
+{
+    HWND fake_window = CreateWindowExW(0, LK_WINDOW_CLASS_NAME, L"fake window", 0, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, 0, 0, instance, 0);
+    if (!fake_window)
+    {
+        /* @Incomplete - logging */
+        return 0;
+    }
+
+    HDC fake_dc = GetDC(fake_window);
+    if (!fake_dc)
+    {
+        /* @Incomplete - logging */
+        goto undo_fake_window;
+    }
+
+    PIXELFORMATDESCRIPTOR fake_pixel_format_desc;
+    ZeroMemory(&fake_pixel_format_desc, sizeof(PIXELFORMATDESCRIPTOR));
+    fake_pixel_format_desc.nSize = sizeof(PIXELFORMATDESCRIPTOR);
+    fake_pixel_format_desc.nVersion = 1;
+    fake_pixel_format_desc.dwFlags = PFD_DRAW_TO_WINDOW | PFD_SUPPORT_OPENGL | PFD_DOUBLEBUFFER;
+    fake_pixel_format_desc.iPixelType = PFD_TYPE_RGBA;
+    fake_pixel_format_desc.cColorBits = 32;
+    fake_pixel_format_desc.cDepthBits = 16;
+    fake_pixel_format_desc.iLayerType = PFD_MAIN_PLANE;
+
+    int fake_pixel_format = ChoosePixelFormat(fake_dc, &fake_pixel_format_desc);
+    if (fake_pixel_format == 0)
+    {
+        /* @Incomplete - logging */
+        goto undo_fake_dc;
+    }
+
+    if (!SetPixelFormat(fake_dc, fake_pixel_format, &fake_pixel_format_desc))
+    {
+        /* @Incomplete - logging */
+        goto undo_fake_dc;
+    }
+
+    HGLRC fake_context = wglCreateContext(fake_dc);
+
+    if (!fake_context)
+    {
+        /* @Incomplete - logging */
+        goto undo_fake_dc;
+    }
+
+    if (!wglMakeCurrent(fake_dc, fake_context))
+    {
+        /* @Incomplete - logging */
+        goto undo_fake_context;
+    }
+
+
+    #define LK_GetWGLFunction(type, name)                                                                       \
+    {                                                                                                           \
+        void* proc = wglGetProcAddress(#name);                                                                  \
+        if (proc && (proc != (void*) 1) && (proc != (void*) 2) && (proc != (void*) 3) && (proc != (void*) -1))  \
+            lk_private.opengl.name = (type*) proc;                                                              \
+        else                                                                                                    \
+            lk_private.opengl.name = 0;                                                                         \
+    }
+
+    LK_GetWGLFunction(WGLChoosePixelFormatARB, wglChoosePixelFormatARB)
+    LK_GetWGLFunction(WGLCreateContextAttribsARB, wglCreateContextAttribsARB)
+    LK_GetWGLFunction(WGLSwapIntervalEXT, wglSwapIntervalEXT)
+
+    #undef LK_GetWGLFunction
+
+
+    HGLRC real_context;
+    if (lk_private.opengl.wglChoosePixelFormatARB && lk_private.opengl.wglCreateContextAttribsARB)
+    {
+        HWND window = lk_private.window.handle;
+        HDC dc = lk_private.window.dc;
+
+        const int WGL_DRAW_TO_WINDOW_ARB    = 0x2001;
+        const int WGL_SUPPORT_OPENGL_ARB    = 0x2010;
+        const int WGL_DOUBLE_BUFFER_ARB     = 0x2011;
+        const int WGL_ACCELERATION_ARB      = 0x2003;
+        const int WGL_PIXEL_TYPE_ARB        = 0x2013;
+        const int WGL_COLOR_BITS_ARB        = 0x2014;
+        const int WGL_DEPTH_BITS_ARB        = 0x2022;
+        const int WGL_STENCIL_BITS_ARB      = 0x2023;
+        const int WGL_SAMPLE_BUFFERS_ARB    = 0x2041;
+        const int WGL_SAMPLES_ARB           = 0x2042;
+
+        const int WGL_FULL_ACCELERATION_ARB = 0x2027;
+        const int WGL_TYPE_RGBA_ARB         = 0x202B;
+
+        int pixel_format_attributes[] =
+        {
+            WGL_DRAW_TO_WINDOW_ARB, 1,
+            WGL_SUPPORT_OPENGL_ARB, 1,
+            WGL_DOUBLE_BUFFER_ARB, 1,
+            WGL_PIXEL_TYPE_ARB, WGL_TYPE_RGBA_ARB,
+            WGL_ACCELERATION_ARB, WGL_FULL_ACCELERATION_ARB,
+            WGL_COLOR_BITS_ARB, (int) lk_platform.opengl.color_bits,
+            WGL_DEPTH_BITS_ARB, (int) lk_platform.opengl.depth_bits,
+            WGL_STENCIL_BITS_ARB, (int) lk_platform.opengl.stencil_bits,
+            WGL_SAMPLE_BUFFERS_ARB, 1,
+            WGL_SAMPLES_ARB, (int) lk_platform.opengl.sample_count,
+            0
+        };
+
+        if (lk_platform.opengl.sample_count <= 1)
+        {
+            // Don't set sample buffers and samples if the user didn't request multisampling.
+            pixel_format_attributes[16] = 0;
+        }
+
+        int pixel_format;
+        UINT pixel_format_count;
+        if (!lk_private.opengl.wglChoosePixelFormatARB(dc, pixel_format_attributes, 0, 1, &pixel_format, &pixel_format_count))
+        {
+            /* @Incomplete - logging */
+            goto undo_fake_context;
+        }
+         
+        if (pixel_format_count == 0)
+        {
+            /* @Incomplete - logging */
+            goto undo_fake_context;
+        }
+
+        PIXELFORMATDESCRIPTOR pixel_format_desc;
+        if (!DescribePixelFormat(dc, pixel_format, sizeof(PIXELFORMATDESCRIPTOR), &pixel_format_desc))
+        {
+            /* @Incomplete - logging */
+            goto undo_fake_context;
+        }
+
+        if (!SetPixelFormat(dc, pixel_format, &pixel_format_desc))
+        {
+            /* @Incomplete - logging */
+            goto undo_fake_context;
+        }
+
+
+
+        const int WGL_CONTEXT_DEBUG_BIT_ARB                 = 0x00000001;
+        const int WGL_CONTEXT_FORWARD_COMPATIBLE_BIT_ARB    = 0x00000002;
+        const int WGL_CONTEXT_MAJOR_VERSION_ARB             = 0x2091;
+        const int WGL_CONTEXT_MINOR_VERSION_ARB             = 0x2092;
+        const int WGL_CONTEXT_FLAGS_ARB                     = 0x2094;
+        const int WGL_CONTEXT_PROFILE_MASK_ARB              = 0x9126;
+        const int WGL_CONTEXT_CORE_PROFILE_BIT_ARB          = 0x00000001;
+        const int WGL_CONTEXT_COMPATIBILITY_PROFILE_BIT_ARB = 0x00000002;
+
+        int flags = WGL_CONTEXT_FORWARD_COMPATIBLE_BIT_ARB;
+        if (lk_platform.opengl.debug_context)
+        {
+            flags |= WGL_CONTEXT_DEBUG_BIT_ARB;
+        }
+
+        int profile = WGL_CONTEXT_CORE_PROFILE_BIT_ARB;
+        if (lk_platform.opengl.compatibility_context)
+        {
+            profile = WGL_CONTEXT_COMPATIBILITY_PROFILE_BIT_ARB;
+        }
+
+        if (!lk_platform.opengl.major_version)
+        {
+            lk_platform.opengl.major_version = 3;
+            lk_platform.opengl.minor_version = 3;
+        }
+
+        int attributes[] =
+        {
+            WGL_CONTEXT_MAJOR_VERSION_ARB, (int) lk_platform.opengl.major_version,
+            WGL_CONTEXT_MINOR_VERSION_ARB, (int) lk_platform.opengl.minor_version,
+            WGL_CONTEXT_FLAGS_ARB, flags,
+            WGL_CONTEXT_PROFILE_MASK_ARB, profile,
+            0
+        };
+
+        if (lk_platform.opengl.major_version < 3)
+        {
+            // Don't set the profile or flags for legacy OpenGL.
+            attributes[4] = 0;
+        }
+
+        real_context = lk_private.opengl.wglCreateContextAttribsARB(dc, 0, attributes);
+
+        if (!real_context)
+        {
+            /* @Incomplete - logging */
+            goto undo_fake_context;
+        }
+
+        wglMakeCurrent(0, 0);
+        wglDeleteContext(fake_context);
+        ReleaseDC(fake_window, fake_dc);
+        DestroyWindow(fake_window);
+
+        if (!wglMakeCurrent(dc, real_context))
+        {
+            /* @Incomplete - logging */
+            goto undo_real_context;
+        }
+
+        lk_private.opengl.context = real_context;
+        return 1; // success!
+    }
+    else
+    {
+        goto undo_fake_context;
+    }
+
+
+undo_real_context:
+    wglDeleteContext(real_context);
+undo_fake_context:
+    wglMakeCurrent(0, 0);
+    wglDeleteContext(fake_context);
+undo_fake_dc:
+    ReleaseDC(fake_window, fake_dc);
+undo_fake_window:
+    DestroyWindow(fake_window);
+    return 0;
+}
+
 static void lk_open_window()
 {
     WNDCLASSEXW window_class;
@@ -1230,123 +1512,37 @@ static void lk_open_window()
         return;
     }
 
-    PIXELFORMATDESCRIPTOR pixel_format_desc;
-    ZeroMemory(&pixel_format_desc, sizeof(PIXELFORMATDESCRIPTOR));
-    pixel_format_desc.nSize = sizeof(PIXELFORMATDESCRIPTOR);
-    pixel_format_desc.nVersion = 1;
-    pixel_format_desc.dwFlags = PFD_DRAW_TO_WINDOW | PFD_DOUBLEBUFFER;
-    pixel_format_desc.iPixelType = PFD_TYPE_RGBA;
-    pixel_format_desc.cColorBits = 32;
-    pixel_format_desc.cDepthBits = 32;
-    pixel_format_desc.cStencilBits = 32;
-    pixel_format_desc.iLayerType = PFD_MAIN_PLANE;
 
     LK_B32 use_opengl = (lk_private.window.backend == LK_WINDOW_OPENGL);
     if (use_opengl)
     {
-        pixel_format_desc.dwFlags |= PFD_SUPPORT_OPENGL;
+        if (!lk_create_modern_opengl_context(instance))
+        {
+            lk_create_legacy_opengl_context(instance);
+        }
     }
-
-    int pixel_format = ChoosePixelFormat(dc, &pixel_format_desc);
-    if (!pixel_format)
+    else
     {
-        /* @Incomplete - logging */
-        return;
-    }
+        PIXELFORMATDESCRIPTOR pixel_format_desc;
+        ZeroMemory(&pixel_format_desc, sizeof(PIXELFORMATDESCRIPTOR));
+        pixel_format_desc.nSize = sizeof(PIXELFORMATDESCRIPTOR);
+        pixel_format_desc.nVersion = 1;
+        pixel_format_desc.dwFlags = PFD_DRAW_TO_WINDOW | PFD_DOUBLEBUFFER;
+        pixel_format_desc.iPixelType = PFD_TYPE_RGBA;
+        pixel_format_desc.cColorBits = 32;
+        pixel_format_desc.iLayerType = PFD_MAIN_PLANE;
 
-    if (!SetPixelFormat(dc, pixel_format, &pixel_format_desc))
-    {
-        /* @Incomplete - logging */
-        return;
-    }
-
-    if (use_opengl)
-    {
-        HGLRC context = wglCreateContext(dc);
-        lk_private.opengl.context = context;
-
-        if (!context)
+        int pixel_format = ChoosePixelFormat(dc, &pixel_format_desc);
+        if (!pixel_format)
         {
             /* @Incomplete - logging */
             return;
         }
 
-        if (!wglMakeCurrent(dc, context))
+        if (!SetPixelFormat(dc, pixel_format, &pixel_format_desc))
         {
             /* @Incomplete - logging */
             return;
-        }
-
-
-        #define LK_GetWGLFunction(type, name)                                                                       \
-        {                                                                                                           \
-            void* proc = wglGetProcAddress(#name);                                                                  \
-            if (proc && (proc != (void*) 1) && (proc != (void*) 2) && (proc != (void*) 3) && (proc != (void*) -1))  \
-                lk_private.opengl.name = (type*) proc;                                                              \
-            else                                                                                                    \
-                lk_private.opengl.name = 0;                                                                         \
-        }
-
-        LK_GetWGLFunction(WGLCreateContextAttribsARB, wglCreateContextAttribsARB)
-        LK_GetWGLFunction(WGLSwapIntervalEXT, wglSwapIntervalEXT)
-
-        #undef LK_GetWGLFunction
-
-
-        if (lk_private.opengl.wglCreateContextAttribsARB)
-        {
-            wglMakeCurrent(0, 0);
-            wglDeleteContext(context);
-
-            const int WGL_CONTEXT_DEBUG_BIT_ARB                 = 0x00000001;
-            const int WGL_CONTEXT_FORWARD_COMPATIBLE_BIT_ARB    = 0x00000002;
-            const int WGL_CONTEXT_MAJOR_VERSION_ARB             = 0x2091;
-            const int WGL_CONTEXT_MINOR_VERSION_ARB             = 0x2092;
-            const int WGL_CONTEXT_FLAGS_ARB                     = 0x2094;
-            const int WGL_CONTEXT_PROFILE_MASK_ARB              = 0x9126;
-            const int WGL_CONTEXT_CORE_PROFILE_BIT_ARB          = 0x00000001;
-            const int WGL_CONTEXT_COMPATIBILITY_PROFILE_BIT_ARB = 0x00000002;
-
-            int flags = WGL_CONTEXT_FORWARD_COMPATIBLE_BIT_ARB;
-            if (lk_platform.opengl.debug_context)
-            {
-                flags |= WGL_CONTEXT_DEBUG_BIT_ARB;
-            }
-
-            int profile = WGL_CONTEXT_CORE_PROFILE_BIT_ARB;
-            if (lk_platform.opengl.compatibility_context)
-            {
-                profile = WGL_CONTEXT_COMPATIBILITY_PROFILE_BIT_ARB;
-            }
-
-            if (!lk_platform.opengl.major_version)
-            {
-                lk_platform.opengl.major_version = 3;
-                lk_platform.opengl.minor_version = 3;
-            }
-
-            int attributes[] =
-            {
-                WGL_CONTEXT_MAJOR_VERSION_ARB, (int) lk_platform.opengl.major_version,
-                WGL_CONTEXT_MINOR_VERSION_ARB, (int) lk_platform.opengl.minor_version,
-                WGL_CONTEXT_FLAGS_ARB, flags,
-                WGL_CONTEXT_PROFILE_MASK_ARB, profile,
-                0
-            };
-
-            context = lk_private.opengl.wglCreateContextAttribsARB(dc, 0, attributes);
-
-            if (!context)
-            {
-                /* @Incomplete - logging */
-                return;
-            }
-
-            if (!wglMakeCurrent(dc, context))
-            {
-                /* @Incomplete - logging */
-                return;
-            }
         }
     }
 
@@ -1682,7 +1878,7 @@ static DWORD lk_audio_thread(LPVOID parameter)
 
         LK_S16* buffer;
         DWORD buffer_size;
-        if (SUCCEEDED(IDirectSoundBuffer_Lock(secondary_buffer, write_cursor, sample_buffer_size, &buffer, &buffer_size, 0, 0, 0)))
+        if (SUCCEEDED(IDirectSoundBuffer_Lock(secondary_buffer, write_cursor, sample_buffer_size, (LPVOID*) &buffer, &buffer_size, 0, 0, 0)))
         {
             if (strategy == LK_AUDIO_CALLBACK)
             {
@@ -1874,13 +2070,77 @@ static void lk_initialize_audio()
     CreateThread(0, 0, lk_audio_thread, 0, 0, 0);
 }
 
+void get_command_line_arguments()
+{
+    LPWSTR command_line = GetCommandLineW();
+
+    int argc;
+    LPWSTR* argv = CommandLineToArgvW(command_line, &argc);
+    if (!argv)
+    {
+        return;
+    }
+
+    int allocation_size = argc * sizeof(char*);
+    for (int i = 0; i < argc; i++)
+    {
+        int size = WideCharToMultiByte(CP_UTF8, 0, argv[i], -1, 0, 0, 0, 0);
+        if (size == 0)
+        {
+            LocalFree(argv);
+            return;
+        }
+
+        allocation_size += size;
+    }
+
+    LK_U8* memory = (LK_U8*) LocalAlloc(LMEM_FIXED, allocation_size);
+    if (!memory)
+    {
+        LocalFree(argv);
+        return;
+    }
+
+    char** result = (char**) memory;
+
+    int available = allocation_size - argc * sizeof(char*);
+    LPSTR write_cursor = (LPSTR)(memory + argc * sizeof(char*));
+
+    for (int i = 0; i < argc; i++)
+    {
+        int size = WideCharToMultiByte(CP_UTF8, 0, argv[i], -1, write_cursor, available, 0, 0);
+        if (size == 0)
+        {
+            LocalFree(memory);
+            LocalFree(argv);
+            return;
+        }
+
+        result[i] = write_cursor;
+        write_cursor += size;
+        available -= size;
+    }
+
+    LocalFree(argv);
+
+    lk_platform.command_line.argument_count = argc;
+    lk_platform.command_line.arguments = result;
+}
+
 static void lk_entry()
 {
+    get_command_line_arguments();
+
     lk_get_dll_paths();
     lk_check_client_reload();
 
     lk_platform.window.x = LK_DEFAULT_POSITION;
     lk_platform.window.y = LK_DEFAULT_POSITION;
+
+    lk_platform.opengl.color_bits   = 32;
+    lk_platform.opengl.depth_bits   = 24;
+    lk_platform.opengl.stencil_bits = 8;
+    lk_platform.opengl.sample_count = 1;
 
     lk_load_client();
 
