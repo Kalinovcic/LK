@@ -305,6 +305,10 @@ typedef struct LK_Platform_Structure
         int argument_count;
         char** arguments;
     } command_line;
+
+#ifdef LK_PLATFORM_USER_CONTEXT
+    LK_PLATFORM_USER_CONTEXT
+#endif
 } LK_Platform;
 
 #ifdef __cplusplus
@@ -324,14 +328,6 @@ extern "C"
 {
 #endif
 
-#ifndef LK_PLATFORM_DLL_NAME
-#error "lk_platform.h implementation expects LK_PLATFORM_DLL_NAME to be defined before it is included."
-#endif
-
-#ifndef LK_PLATFORM_TEMP_DLL_NAME
-#define LK_PLATFORM_TEMP_DLL_NAME LK_PLATFORM_DLL_NAME "_temp"
-#endif
-
 #ifndef LK_WINDOW_CLASS_NAME
 #define LK_WINDOW_CLASS_NAME L"lk_platform_window_class"
 #endif
@@ -346,6 +342,8 @@ typedef void LK_Client_Init_Function(LK_Platform* platform);
 typedef void LK_Client_Close_Function(LK_Platform* platform);
 typedef void LK_Client_Frame_Function(LK_Platform* platform);
 typedef void LK_Client_Audio_Function(LK_Platform* platform, LK_S16* samples);
+typedef void LK_Client_Dll_Load_Function(LK_Platform* platform);
+typedef void LK_Client_Dll_Unload_Function(LK_Platform* platform);
 
 typedef BOOL WGLChoosePixelFormatARB(HDC hdc, const int *piAttribIList, const FLOAT *pfAttribFList, UINT nMaxFormats, int *piFormats, UINT *nNumFormats);
 typedef HGLRC WGLCreateContextAttribsARB(HDC hDC, HGLRC hShareContext, const int* attribList);
@@ -388,6 +386,10 @@ typedef struct
         LK_Client_Close_Function* close;
         LK_Client_Frame_Function* frame;
         LK_Client_Audio_Function* audio;
+        LK_Client_Dll_Load_Function* dll_load;
+        LK_Client_Dll_Unload_Function* dll_unload;
+
+        LK_B32 load_failed;
     } client;
 
     struct
@@ -460,19 +462,65 @@ static LK_Platform_Private lk_private;
 static void lk_client_init_stub(LK_Platform* platform) {}
 static void lk_client_frame_stub(LK_Platform* platform) {}
 static void lk_client_close_stub(LK_Platform* platform) {}
+static void lk_client_dll_load_stub(LK_Platform* platform) {}
+static void lk_client_dll_unload_stub(LK_Platform* platform) {}
 
 static void lk_client_audio_stub(LK_Platform* platform, LK_S16* samples)
 {
     ZeroMemory(samples, platform->audio.sample_count * platform->audio.channels * 2);
 }
 
-static void lk_get_dll_paths()
+#ifdef LK_PLATFORM_NO_DLL
+
+static void lk_set_client_functions()
+{
+    HMODULE module = GetModuleHandle(NULL);
+    lk_private.client.library = module;
+
+    if (module)
+    {
+        #define LK_GetClientFunction(ptr, type, name)    \
+            ptr = (type*) GetProcAddress(module, #name); \
+            if (!ptr)                                    \
+            {                                            \
+                /* @Incomplete - logging */              \
+                ptr = name##_stub;                       \
+            }
+
+        LK_GetClientFunction(lk_private.client.init,       LK_Client_Init_Function,       lk_client_init);
+        LK_GetClientFunction(lk_private.client.close,      LK_Client_Close_Function,      lk_client_close);
+        LK_GetClientFunction(lk_private.client.frame,      LK_Client_Frame_Function,      lk_client_frame);
+        LK_GetClientFunction(lk_private.client.audio,      LK_Client_Audio_Function,      lk_client_audio);
+        LK_GetClientFunction(lk_private.client.dll_load,   LK_Client_Dll_Load_Function,   lk_client_dll_load);
+        LK_GetClientFunction(lk_private.client.dll_unload, LK_Client_Dll_Unload_Function, lk_client_dll_unload);
+
+        #undef LK_GetClientFunction
+
+        lk_private.client.dll_load(&lk_platform);
+    }
+    else
+    {
+        /* @Incomplete - logging */
+        lk_private.client.init       = lk_client_init_stub;
+        lk_private.client.close      = lk_client_close_stub;
+        lk_private.client.frame      = lk_client_frame_stub;
+        lk_private.client.audio      = lk_client_audio_stub;
+        lk_private.client.dll_load   = lk_client_dll_load_stub;
+        lk_private.client.dll_unload = lk_client_dll_unload_stub;
+    }
+}
+
+#else
+
+#ifndef LK_PLATFORM_DLL_NAME
+#error "lk_platform.h implementation expects LK_PLATFORM_DLL_NAME to be defined before it is included."
+#endif
+
+static void lk_get_dll_path()
 {
     const char dll_name[] = LK_PLATFORM_DLL_NAME ".dll";
-    const char temp_dll_name[] = LK_PLATFORM_TEMP_DLL_NAME ".dll";
 
     LPSTR dll_path = lk_private.client.dll_path;
-    LPSTR temp_dll_path = lk_private.client.temp_dll_path;
 
     DWORD directory_length = GetModuleFileNameA(0, dll_path, sizeof(lk_private.client.dll_path)); // @Incomplete - the buffer could be too small!
     while (dll_path[directory_length] != '\\' && dll_path[directory_length] != '/')
@@ -480,12 +528,15 @@ static void lk_get_dll_paths()
     directory_length++;
 
     CopyMemory(dll_path + directory_length, dll_name, sizeof(dll_name) + 1);
-    CopyMemory(temp_dll_path, dll_path, directory_length);
-    CopyMemory(temp_dll_path + directory_length, temp_dll_name, sizeof(temp_dll_name) + 1);
 }
 
 static LK_B32 lk_check_client_reload()
 {
+    if (lk_private.client.load_failed)
+    {
+        return 1;
+    }
+
     FILETIME file_time;
     ZeroMemory(&file_time, sizeof(FILETIME));
 
@@ -506,6 +557,43 @@ static LK_B32 lk_check_client_reload()
     return 0;
 }
 
+static void lk_get_temp_dll_path()
+{
+    char* temp_dll_path = lk_private.client.temp_dll_path;
+
+    // Copy dll_path over to temp_dll_path
+    for (char* dll_path = lk_private.client.dll_path; *dll_path; dll_path++, temp_dll_path++)
+    {
+        *temp_dll_path = *dll_path;
+    }
+
+    temp_dll_path -= 4; // Remove trailing ".dll"
+
+    // Append "_temp"
+    CopyMemory(temp_dll_path, "_temp", 5);
+    temp_dll_path += 5;
+
+    // Append hexadecimal time
+    char hex_lookup[] = { '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'a', 'b', 'c', 'd', 'e', 'f' };
+    LK_U8* time = (LK_U8*) &lk_private.client.last_dll_write_time;
+    for (int i = 0; i < 8; i++)
+    {
+        LK_U8 byte = *(time++);
+        *(temp_dll_path++) = hex_lookup[byte >> 4];
+        *(temp_dll_path++) = hex_lookup[byte & 0xF];
+    }
+
+    // Append hexadecimal PID
+    DWORD pid = GetCurrentProcessId();
+    for (int i = 0; i < 8; i++)
+    {
+        *(temp_dll_path++) = hex_lookup[(pid >> (i * 4)) & 0xF];
+    }
+
+    // Append ".dll" and null terminator
+    CopyMemory(temp_dll_path, ".dll", 5);
+}
+
 static void lk_load_client()
 {
     LPSTR dll_path = lk_private.client.dll_path;
@@ -521,6 +609,8 @@ static void lk_load_client()
 
     if (library)
     {
+        lk_private.client.load_failed = 0;
+
         #define LK_GetClientFunction(ptr, type, name)     \
             ptr = (type*) GetProcAddress(library, #name); \
             if (!ptr)                                     \
@@ -529,16 +619,28 @@ static void lk_load_client()
                 ptr = name##_stub;                        \
             }
 
-        LK_GetClientFunction(lk_private.client.init,  LK_Client_Init_Function,  lk_client_init);
-        LK_GetClientFunction(lk_private.client.close, LK_Client_Close_Function, lk_client_close);
-        LK_GetClientFunction(lk_private.client.frame, LK_Client_Frame_Function, lk_client_frame);
-        LK_GetClientFunction(lk_private.client.audio, LK_Client_Audio_Function, lk_client_audio);
+        LK_GetClientFunction(lk_private.client.init,       LK_Client_Init_Function,       lk_client_init);
+        LK_GetClientFunction(lk_private.client.close,      LK_Client_Close_Function,      lk_client_close);
+        LK_GetClientFunction(lk_private.client.frame,      LK_Client_Frame_Function,      lk_client_frame);
+        LK_GetClientFunction(lk_private.client.audio,      LK_Client_Audio_Function,      lk_client_audio);
+        LK_GetClientFunction(lk_private.client.dll_load,   LK_Client_Dll_Load_Function,   lk_client_dll_load);
+        LK_GetClientFunction(lk_private.client.dll_unload, LK_Client_Dll_Unload_Function, lk_client_dll_unload);
 
         #undef LK_GetClientFunction
+
+        lk_private.client.dll_load(&lk_platform);
     }
     else
     {
         /* @Incomplete - logging */
+        lk_private.client.load_failed = 1;
+
+        lk_private.client.init       = lk_client_init_stub;
+        lk_private.client.close      = lk_client_close_stub;
+        lk_private.client.frame      = lk_client_frame_stub;
+        lk_private.client.audio      = lk_client_audio_stub;
+        lk_private.client.dll_load   = lk_client_dll_load_stub;
+        lk_private.client.dll_unload = lk_client_dll_unload_stub;
     }
 }
 
@@ -546,14 +648,24 @@ static void lk_unload_client()
 {
     if (lk_private.client.library)
     {
+        lk_private.client.dll_unload(&lk_platform);
+
         if (!FreeLibrary(lk_private.client.library))
         {
             /* @Incomplete - logging */
         }
 
         lk_private.client.library = 0;
+        lk_private.client.init = 0;
+        lk_private.client.close = 0;
+        lk_private.client.frame = 0;
+        lk_private.client.audio = 0;
+        lk_private.client.dll_load = 0;
+        lk_private.client.dll_unload = 0;
     }
 }
+
+#endif
 
 static LONG lk_apply_window_style(LONG old_style, LK_B32 ignore_fullscreen)
 {
@@ -2070,7 +2182,7 @@ static void lk_initialize_audio()
     CreateThread(0, 0, lk_audio_thread, 0, 0, 0);
 }
 
-void get_command_line_arguments()
+void lk_get_command_line_arguments()
 {
     LPWSTR command_line = GetCommandLineW();
 
@@ -2129,10 +2241,13 @@ void get_command_line_arguments()
 
 static void lk_entry()
 {
-    get_command_line_arguments();
+    lk_get_command_line_arguments();
 
-    lk_get_dll_paths();
+#ifndef LK_PLATFORM_NO_DLL
+    lk_get_dll_path();
     lk_check_client_reload();
+    lk_get_temp_dll_path();
+#endif
 
     lk_platform.window.x = LK_DEFAULT_POSITION;
     lk_platform.window.y = LK_DEFAULT_POSITION;
@@ -2142,9 +2257,14 @@ static void lk_entry()
     lk_platform.opengl.stencil_bits = 8;
     lk_platform.opengl.sample_count = 1;
 
-    lk_load_client();
-
     lk_initialize_timer();
+
+#ifdef LK_PLATFORM_NO_DLL
+    lk_set_client_functions();
+#else
+    lk_load_client();
+#endif
+
     lk_private.client.init(&lk_platform);
 
     lk_private.window.backend = lk_platform.window.backend;
@@ -2164,11 +2284,14 @@ static void lk_entry()
 
     while (!lk_platform.break_frame_loop)
     {
+#ifndef LK_PLATFORM_NO_DLL
         if (lk_check_client_reload())
         {
             lk_unload_client();
+            lk_get_temp_dll_path();
             lk_load_client();
         }
+#endif
 
         lk_push();
         lk_window_message_loop();
@@ -2185,7 +2308,12 @@ static void lk_entry()
     lk_private.client.close(&lk_platform);
 
     lk_close_window();
+
+#ifdef LK_PLATFORM_NO_DLL
+    lk_private.client.dll_unload(&lk_platform);
+#else
     lk_unload_client();
+#endif
 }
 
 #ifndef LK_PLATFORM_NO_MAIN
