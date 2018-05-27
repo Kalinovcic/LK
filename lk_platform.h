@@ -33,6 +33,8 @@ extern "C"
 {
 #endif
 
+#ifndef LK_SIMPLE_TYPES
+#define LK_SIMPLE_TYPES
 typedef signed char  LK_S8;
 typedef signed short LK_S16;
 typedef signed long  LK_S32;
@@ -48,6 +50,7 @@ typedef LK_U32 LK_B32;
 
 typedef float  LK_F32;
 typedef double LK_F64;
+#endif
 
 typedef enum
 {
