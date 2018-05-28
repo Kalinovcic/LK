@@ -1,7 +1,53 @@
-//  lk_platform.h - public domain platform abstraction layer
+//  lk_platform.h - public domain platform abstraction layer with live code editing support
 //  no warranty is offered or implied
 
 /*********************************************************************************************
+
+Include this file in all places you need to refer to it. In one of your compilation units, write:
+    #define LK_PLATFORM_IMPLEMENTATION
+before including lk_platform.h, in order to paste in the source code.
+
+This library provides a platform layer with support for live code editing. That enables you to
+modify your source code, recompile it, and see the changes happen live (on the next frame),
+without restarting the application. In order for this to work, you should compile this
+platform layer to an EXE, and compile the rest of your application code to a DLL. The platform
+layer will then load the DLL dynamically at runtime, and reload it if it detects a change.
+
+If you want live code editing, you must specify the DLL name (not including the extension) by defining:
+    #define LK_PLATFORM_DLL_NAME "my_application_dll"
+before including the implementation of lk_platform.h.
+
+If you don't want live code editing, you must disable it by defining:
+    #define LK_PLATFORM_NO_DLL
+before including the implementation of lk_platform.h.
+
+As for the platform layer itself, it's designed to minimize interaction between the application
+and the platform. All communication goes through a single LK_Platform context struct, and the only
+way the platform ever interfaces with the application is by calling a small set of predefined functions.
+In a way, this is a function-less library, the application exposes all the functions.
+
+Your application doesn't necessarily have to expose any functions, but you probably want these:
+
+    LK_CLIENT_EXPORT void lk_client_init(LK_Platform* platform);    // called once, before any platform stuff is created
+    LK_CLIENT_EXPORT void lk_client_close(LK_Platform* platform);   // called once, before all platform stuff is destroyed
+    LK_CLIENT_EXPORT void lk_client_frame(LK_Platform* platform);   // called each frame if your application has a window
+
+You can also expose these, to get notified when your DLL was loaded or unloaded:
+
+    LK_CLIENT_EXPORT void lk_client_dll_load(LK_Platform* platform);
+    LK_CLIENT_EXPORT void lk_client_dll_unload(LK_Platform* platform);
+
+Note that lk_client_dll_load() is the first of all functions to be called,
+and lk_client_dll_unload() is the last, after everything is destroyed.
+
+If you're doing audio output using the LK_AUDIO_CALLBACK strategy, you should expose:
+
+    LK_CLIENT_EXPORT void lk_client_audio(LK_Platform* platform, LK_S16* samples);  // called every so often on a separate thread,
+                                                                                       you should fill out the samples array
+
+The platform pointer that's passed in all of the functions is unique and never changes during the lifetime of the application.
+If you're using dynamic DLL loading, all of your global variables WILL BE DESTROYED after the DLL gets unloaded.
+You can keep a pointer to persistent storage in platform->client_data.
 
 QUICK NOTES
     @Incomplete
