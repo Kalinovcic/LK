@@ -280,6 +280,11 @@ typedef struct LK_Platform_Structure
         LK_B32 undecorated;
         LK_B32 invisible;
         LK_B32 disable_animations;
+
+        // The icon is set once, when the window is created, if icon_pixels is set.
+        LK_U32 icon_width;
+        LK_U32 icon_height;
+        LK_U8* icon_pixels; // must be RGBA, left to right, top to bottom
     } window;
 
     struct
@@ -1344,6 +1349,77 @@ static void lk_disable_window_animations(HWND window)
     }
 }
 
+static void lk_set_window_icon(HWND window, HDC dc)
+{
+    LK_U32 width = lk_platform.window.icon_width;
+    LK_U32 height = lk_platform.window.icon_height;
+
+    BITMAPV5HEADER bitmap_header;
+    ZeroMemory(&bitmap_header, sizeof(BITMAPV5HEADER));
+    bitmap_header.bV5Size        = sizeof(BITMAPV5HEADER);
+    bitmap_header.bV5Width       = width;
+    bitmap_header.bV5Height      = height;
+    bitmap_header.bV5Planes      = 1;
+    bitmap_header.bV5BitCount    = 32;
+    bitmap_header.bV5Compression = BI_BITFIELDS;
+    bitmap_header.bV5RedMask     = 0x00FF0000;
+    bitmap_header.bV5GreenMask   = 0x0000FF00;
+    bitmap_header.bV5BlueMask    = 0x000000FF;
+    bitmap_header.bV5AlphaMask   = 0xFF000000;
+
+    void* bitmap_data;
+    HBITMAP bitmap = CreateDIBSection(dc, (BITMAPINFO*) &bitmap_header, DIB_RGB_COLORS, &bitmap_data, 0, 0);
+    if (bitmap)
+    {
+        for (LK_U32 y = 0; y < height; y++)
+        {
+            LK_U32* read  = (LK_U32*) lk_platform.window.icon_pixels + y * width;
+            LK_U32* write = (LK_U32*) bitmap_data + (height - y - 1) * width;
+
+            for (LK_U32 x = 0; x < width; x++)
+            {
+                LK_U32 value = *(read++);
+                value = (value & 0xFF00FF00)
+                     | ((value & 0x00FF0000) >> 16)
+                     | ((value & 0x000000FF) << 16);
+                *(write++) = value;
+            }
+        }
+
+        HBITMAP mono_bitmap = CreateBitmap(width, height, 1, 1, 0);
+        if (mono_bitmap)
+        {
+            ICONINFO info;
+            info.fIcon = TRUE;
+            info.xHotspot = 0;
+            info.yHotspot = 0;
+            info.hbmMask = mono_bitmap;
+            info.hbmColor = bitmap;
+
+            HICON icon = CreateIconIndirect(&info);
+            if (icon)
+            {
+                SendMessage(window, WM_SETICON, ICON_SMALL, (LPARAM) icon);
+                SendMessage(window, WM_SETICON, ICON_BIG,   (LPARAM) icon);
+            }
+            else
+            {
+                /* @Incomplete - logging */
+                return;
+            }
+
+            DeleteObject(mono_bitmap);
+        }
+        else
+        {
+            /* @Incomplete - logging */
+            return;
+        }
+
+        DeleteObject(bitmap);
+    }
+}
+
 static void lk_create_legacy_opengl_context(HINSTANCE instance)
 {
     HWND window = lk_private.window.handle;
@@ -1671,6 +1747,12 @@ static void lk_open_window()
     {
         /* @Incomplete - logging */
         return;
+    }
+
+
+    if (lk_platform.window.icon_pixels)
+    {
+        lk_set_window_icon(window_handle, dc);
     }
 
 
