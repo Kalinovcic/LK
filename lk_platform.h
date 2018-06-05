@@ -110,6 +110,7 @@ typedef struct
     LK_B8 released;
     LK_B8 down;
     LK_B8 was_down; // The state of "down" for the previous frame.
+    LK_B8 repeated; // true when "pressed" is true, or when a repeat event happened
 } LK_Digital_Button;
 
 typedef enum
@@ -849,6 +850,11 @@ static void lk_push()
 
     lk_push_window_data();
     lk_window_update_title();
+
+    for (int key_index = 0; key_index < LK__KEY_COUNT; key_index++)
+    {
+        lk_platform.keyboard.state[key_index].repeated = 0;
+    }
 }
 
 
@@ -1187,6 +1193,10 @@ lk_window_callback(HWND window, UINT message, WPARAM wparam, LPARAM lparam)
             if (key)
             {
                 int is_down = (flags & RI_KEY_BREAK) == 0;
+                if (is_down)
+                {
+                    lk_platform.keyboard.state[key].repeated = 1;
+                }
                 lk_platform.keyboard.state[key].down = is_down;
             }
         }
