@@ -115,38 +115,18 @@ typedef struct
 
 typedef enum
 {
-    LK_KEY_ESCAPE = 1,
-    LK_KEY_GRAVE,
-    LK_KEY_TAB,
-    LK_KEY_CAPS_LOCK,
-    LK_KEY_LEFT_SHIFT,
-    LK_KEY_LEFT_CONTROL,
-    LK_KEY_LEFT_WINDOWS,
-    LK_KEY_LEFT_ALT,
-    LK_KEY_RIGHT_SHIFT,
-    LK_KEY_RIGHT_CONTROL,
-    LK_KEY_RIGHT_WINDOWS,
-    LK_KEY_RIGHT_ALT,
-    LK_KEY_SPACE,
-    LK_KEY_BACKSPACE,
-    LK_KEY_ENTER,
+// The following constants match their ASCII encoding
+    LK_KEY_BACKSPACE = '\b', // 8
+    LK_KEY_TAB       = '\t', // 9
+    LK_KEY_ENTER     = '\n', // 10
+    LK_KEY_ESCAPE    = 27,   // 27 '\e'
+    LK_KEY_SPACE     = ' ',  // 32
+    LK_KEY_COMMA     = ',',  // 44
+    LK_KEY_PERIOD    = '.',  // 46
+    LK_KEY_GRAVE     = '`',  // 96
+    LK_KEY_DELETE    = 127,
 
-    LK_KEY_PRINT_SCREEN,
-    LK_KEY_SCREEN_LOCK,
-    LK_KEY_PAUSE,
-    LK_KEY_INSERT,
-    LK_KEY_DELETE,
-    LK_KEY_HOME,
-    LK_KEY_END,
-    LK_KEY_PAGE_UP,
-    LK_KEY_PAGE_DOWN,
-
-    LK_KEY_ARROW_LEFT,
-    LK_KEY_ARROW_RIGHT,
-    LK_KEY_ARROW_UP,
-    LK_KEY_ARROW_DOWN,
-
-    LK_KEY_0 = 48, // '0'
+    LK_KEY_0 = '0', // 48
     LK_KEY_1,
     LK_KEY_2,
     LK_KEY_3,
@@ -157,7 +137,7 @@ typedef enum
     LK_KEY_8,
     LK_KEY_9,
 
-    LK_KEY_A = 65, // 'A'
+    LK_KEY_A = 'A', // 65
     LK_KEY_B,
     LK_KEY_C,
     LK_KEY_D,
@@ -184,10 +164,35 @@ typedef enum
     LK_KEY_Y,
     LK_KEY_Z,
 
-    LK_KEY_PERIOD,
-    LK_KEY_COMMA,
+// The following constants don't match any encoding.
+// You may NOT assume that they remain the same in future versions.
+// You may assume the RELATIVE order of constants that involve numbers.
+// For example, you can do stuff like LK_KEY_F1 + i, or LK_KEY_NUMPAD_0 + i.
+    LK_KEY_CAPS_LOCK = 128,
+    LK_KEY_LEFT_SHIFT,
+    LK_KEY_LEFT_CONTROL,
+    LK_KEY_LEFT_WINDOWS,
+    LK_KEY_LEFT_ALT,
+    LK_KEY_RIGHT_SHIFT,
+    LK_KEY_RIGHT_CONTROL,
+    LK_KEY_RIGHT_WINDOWS,
+    LK_KEY_RIGHT_ALT,
 
-    LK_KEY_NUMLOCK = 128,
+    LK_KEY_PRINT_SCREEN,
+    LK_KEY_SCREEN_LOCK,
+    LK_KEY_PAUSE,
+    LK_KEY_INSERT,
+    LK_KEY_HOME,
+    LK_KEY_END,
+    LK_KEY_PAGE_UP,
+    LK_KEY_PAGE_DOWN,
+
+    LK_KEY_ARROW_LEFT,
+    LK_KEY_ARROW_RIGHT,
+    LK_KEY_ARROW_UP,
+    LK_KEY_ARROW_DOWN,
+
+    LK_KEY_NUMLOCK,
     LK_KEY_NUMPAD_PLUS,
     LK_KEY_NUMPAD_MINUS,
     LK_KEY_NUMPAD_MULTIPLY,
