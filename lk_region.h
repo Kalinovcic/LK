@@ -133,6 +133,10 @@ void lk_region_free(LK_Region* region)
         VirtualFree(page, 0, MEM_RELEASE);
         page = next_page;
     }
+
+    region->alloc_head = NULL;
+    region->page_end = NULL;
+    region->cursor = NULL;
 }
 
 #else // !defined(_WIN32)
