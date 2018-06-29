@@ -857,6 +857,8 @@ static void lk_window_update_title()
 
         HWND window = lk_private.window.handle;
         SetWindowTextA(window, new_copy);
+
+        lk_platform.window.title = NULL;
     }
 }
 
@@ -2485,6 +2487,10 @@ static void lk_entry()
 
     while (!lk_platform.break_frame_loop)
     {
+        lk_push();
+        lk_window_message_loop();
+        lk_pull();
+        
 #ifndef LK_PLATFORM_NO_DLL
         if (lk_check_client_reload())
         {
@@ -2493,10 +2499,6 @@ static void lk_entry()
             lk_load_client();
         }
 #endif
-
-        lk_push();
-        lk_window_message_loop();
-        lk_pull();
 
         lk_update_time_stamp();
         lk_private.client.frame(&lk_platform);
