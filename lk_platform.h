@@ -463,6 +463,8 @@ typedef struct
         LK_Window_Backend backend;
         BITMAPINFO bitmap_info;
 
+        char* title;
+
         LK_S32 x;
         LK_S32 y;
         LK_U32 width;
@@ -833,8 +835,29 @@ static void lk_push_window_data()
 
 static void lk_window_update_title()
 {
-    HWND window = lk_private.window.handle;
-    SetWindowTextA(window, lk_platform.window.title);
+    char* new_title = lk_platform.window.title;
+    if (new_title)
+    {
+        char* current_title = lk_private.window.title;
+        if (current_title)
+        {
+            if (lstrcmpA(new_title, current_title) == 0)
+            {
+                return;
+            }
+
+            LocalFree(current_title);
+        }
+
+        int new_length = lstrlenA(new_title);
+        char* new_copy = (char*) LocalAlloc(LMEM_FIXED, new_length + 1);
+        CopyMemory(new_copy, new_title, new_length + 1);
+
+        lk_private.window.title = new_copy;
+
+        HWND window = lk_private.window.handle;
+        SetWindowTextA(window, new_copy);
+    }
 }
 
 static void lk_push()
@@ -1007,9 +1030,6 @@ lk_window_callback(HWND window, UINT message, WPARAM wparam, LPARAM lparam)
         return DefWindowProcW(window, message, wparam, lparam);
     }
 
-
-    LRESULT result = 0;
-
     switch (message)
     {
 
@@ -1042,7 +1062,6 @@ lk_window_callback(HWND window, UINT message, WPARAM wparam, LPARAM lparam)
 
             *write = 0;
         }
-        break;
     } break;
 
     case WM_INPUT:
@@ -1229,6 +1248,11 @@ lk_window_callback(HWND window, UINT message, WPARAM wparam, LPARAM lparam)
         goto run_default_proc;
     } break;
 
+    case WM_ERASEBKGND:
+    {
+        return 1;
+    } break;
+
     case WM_TIMER:
     {
         SwitchToFiber(lk_private.window.main_fiber);
@@ -1246,6 +1270,31 @@ lk_window_callback(HWND window, UINT message, WPARAM wparam, LPARAM lparam)
         KillTimer(window, 0);
     } break;
 
+    case WM_SETCURSOR:
+    {
+        if (LOWORD(lparam) == HTCLIENT)
+        {
+            static HCURSOR cursor = LoadCursor(NULL, IDC_ARROW);
+            SetCursor(cursor);
+            return 1;
+        }
+
+        goto run_default_proc;
+    } break;
+
+    case WM_SYSCOMMAND:
+    {
+        WPARAM command = (wparam & 0xFFF0);
+        if (command == SC_KEYMENU)
+            return 0;
+
+        if (command == SC_SCREENSAVE || command == SC_MONITORPOWER)
+            if (lk_private.window.fullscreen)
+                return 0;
+
+        goto run_default_proc;
+    } break;
+
     default:
     {
         goto run_default_proc;
@@ -1253,7 +1302,7 @@ lk_window_callback(HWND window, UINT message, WPARAM wparam, LPARAM lparam)
 
     }
 
-    return result;
+    return 0;
 run_default_proc:
     return DefWindowProcW(window, message, wparam, lparam);
 }
@@ -1860,6 +1909,12 @@ static void lk_close_window()
     lk_private.window.handle = 0;
     lk_private.window.dc = 0;
     lk_private.opengl.context = 0;
+
+    if (lk_private.window.title)
+    {
+        LocalFree(lk_private.window.title);
+        lk_private.window.title = NULL;
+    }
 }
 
 static void CALLBACK lk_message_fiber_proc(void* unused)
