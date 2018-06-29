@@ -656,6 +656,16 @@ static void lk_get_temp_dll_path()
     CopyMemory(temp_dll_path, ".dll", 5);
 }
 
+static void lk_delete_temp_dll()
+{
+    LPSTR temp_dll_path = lk_private.client.temp_dll_path;
+    if (temp_dll_path[0])
+    {
+        DeleteFileA(temp_dll_path);
+        temp_dll_path[0] = 0;
+    }
+}
+
 static void lk_load_client()
 {
     LPSTR dll_path = lk_private.client.dll_path;
@@ -725,6 +735,8 @@ static void lk_unload_client()
         lk_private.client.dll_load = 0;
         lk_private.client.dll_unload = 0;
     }
+
+    lk_delete_temp_dll();
 }
 
 #endif
@@ -838,25 +850,8 @@ static void lk_window_update_title()
     char* new_title = lk_platform.window.title;
     if (new_title)
     {
-        char* current_title = lk_private.window.title;
-        if (current_title)
-        {
-            if (lstrcmpA(new_title, current_title) == 0)
-            {
-                return;
-            }
-
-            LocalFree(current_title);
-        }
-
-        int new_length = lstrlenA(new_title);
-        char* new_copy = (char*) LocalAlloc(LMEM_FIXED, new_length + 1);
-        CopyMemory(new_copy, new_title, new_length + 1);
-
-        lk_private.window.title = new_copy;
-
         HWND window = lk_private.window.handle;
-        SetWindowTextA(window, new_copy);
+        SetWindowTextA(window, new_title);
 
         lk_platform.window.title = NULL;
     }
@@ -1911,12 +1906,6 @@ static void lk_close_window()
     lk_private.window.handle = 0;
     lk_private.window.dc = 0;
     lk_private.opengl.context = 0;
-
-    if (lk_private.window.title)
-    {
-        LocalFree(lk_private.window.title);
-        lk_private.window.title = NULL;
-    }
 }
 
 static void CALLBACK lk_message_fiber_proc(void* unused)
@@ -2385,7 +2374,7 @@ static void lk_initialize_audio()
     CreateThread(0, 0, lk_audio_thread, 0, 0, 0);
 }
 
-void lk_get_command_line_arguments()
+static void lk_get_command_line_arguments()
 {
     LPWSTR command_line = GetCommandLineW();
 
@@ -2442,7 +2431,7 @@ void lk_get_command_line_arguments()
     lk_platform.command_line.arguments = result;
 }
 
-static void lk_entry()
+void lk_entry()
 {
     lk_get_command_line_arguments();
 
@@ -2490,7 +2479,7 @@ static void lk_entry()
         lk_push();
         lk_window_message_loop();
         lk_pull();
-        
+
 #ifndef LK_PLATFORM_NO_DLL
         if (lk_check_client_reload())
         {
@@ -2519,6 +2508,29 @@ static void lk_entry()
 #endif
 }
 
+#ifndef LK_PLATFORM_NO_DLL
+static BOOL WINAPI lk_console_ctrl_handler(DWORD ctrl_type)
+{
+    if (ctrl_type == CTRL_C_EVENT)
+    {
+        // We want to kill the client quickly, without calling dll_unload.
+        // That's why we set dll_unload to the stub function here.
+        lk_private.client.dll_unload = lk_client_dll_unload_stub;
+        lk_unload_client();
+    }
+
+    return FALSE;
+}
+#endif
+
+void lk_console_entry()
+{
+#ifndef LK_PLATFORM_NO_DLL
+    SetConsoleCtrlHandler(lk_console_ctrl_handler, TRUE);
+#endif
+    lk_entry();
+}
+
 #ifndef LK_PLATFORM_NO_MAIN
 int CALLBACK WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow)
 {
@@ -2528,7 +2540,7 @@ int CALLBACK WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLi
 
 int main(int argc, char** argv)
 {
-    lk_entry();
+    lk_console_entry();
     return 0;
 }
 #endif
