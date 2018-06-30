@@ -621,12 +621,24 @@ static LK_B32 lk_check_client_reload()
 
 static void lk_get_temp_dll_path()
 {
-    char* temp_dll_path = lk_private.client.temp_dll_path;
+    // Get process serial number
+    LONG serial = 0;
+
+    const char* semaphore_name = "lk_platform_" LK_PLATFORM_DLL_NAME "_count";
+    HANDLE semaphore = CreateSemaphoreA(NULL, 0, 2147483647, semaphore_name);
+    if (semaphore)
+    {
+        ReleaseSemaphore(semaphore, 1, &serial);
+    }
 
     // Copy dll_path over to temp_dll_path
+    char* temp_dll_path = lk_private.client.temp_dll_path;
+
+    int dll_path_length = 0;
     for (char* dll_path = lk_private.client.dll_path; *dll_path; dll_path++, temp_dll_path++)
     {
         *temp_dll_path = *dll_path;
+        dll_path_length++;
     }
 
     temp_dll_path -= 4; // Remove trailing ".dll"
@@ -635,21 +647,12 @@ static void lk_get_temp_dll_path()
     CopyMemory(temp_dll_path, "_temp", 5);
     temp_dll_path += 5;
 
-    // Append hexadecimal time
-    char hex_lookup[] = { '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'a', 'b', 'c', 'd', 'e', 'f' };
-    LK_U8* time = (LK_U8*) &lk_private.client.last_dll_write_time;
-    for (int i = 0; i < 8; i++)
+    // Append hexadecimal serial number
+    const char* hex_lookup = "0123456789abcdef";
+    while (serial != 0)
     {
-        LK_U8 byte = *(time++);
-        *(temp_dll_path++) = hex_lookup[byte >> 4];
-        *(temp_dll_path++) = hex_lookup[byte & 0xF];
-    }
-
-    // Append hexadecimal PID
-    DWORD pid = GetCurrentProcessId();
-    for (int i = 0; i < 8; i++)
-    {
-        *(temp_dll_path++) = hex_lookup[(pid >> (i * 4)) & 0xF];
+        *(temp_dll_path++) = hex_lookup[serial & 0xF];
+        serial /= 16;
     }
 
     // Append ".dll" and null terminator
@@ -662,7 +665,6 @@ static void lk_delete_temp_dll()
     if (temp_dll_path[0])
     {
         DeleteFileA(temp_dll_path);
-        temp_dll_path[0] = 0;
     }
 }
 
@@ -2484,7 +2486,6 @@ void lk_entry()
         if (lk_check_client_reload())
         {
             lk_unload_client();
-            lk_get_temp_dll_path();
             lk_load_client();
         }
 #endif
