@@ -366,6 +366,32 @@ typedef struct LK_Platform_Structure
         char** arguments;
     } command_line;
 
+    struct
+    {
+        const char* vendor;
+
+        LK_U32 logical_count;
+        LK_U32 cache_line_size;
+
+        LK_B8 has_rdtsc;
+        LK_B8 has_mmx;
+        LK_B8 has_sse;
+        LK_B8 has_sse2;
+        LK_B8 has_sse3;
+        LK_B8 has_sse41;
+        LK_B8 has_sse42;
+        LK_B8 has_avx;
+        LK_B8 has_avx2;
+        LK_B8 has_avx512f;
+        LK_B8 has_altivec;
+        LK_B8 has_3dnow;
+        LK_B8 has_hyperthreading;
+
+        LK_U64 ram_bytes;
+        LK_U64 ram_kilobytes;
+        LK_U64 ram_megabytes;
+    } system;
+
 #ifdef LK_PLATFORM_USER_CONTEXT
     LK_PLATFORM_USER_CONTEXT
 #endif
@@ -2376,6 +2402,146 @@ static void lk_initialize_audio()
     CreateThread(0, 0, lk_audio_thread, 0, 0, 0);
 }
 
+static void lk_fill_system_info()
+{
+    // @Incomplete - On x86, check if we have cpuid at all.
+
+    LK_U32 id0[4];
+    LK_U32 id1[4];
+    LK_U32 id7[4];
+    LK_U32 id80000000[4];
+    LK_U32 id80000001[4];
+
+    LK_B32 os_saves_ymm = 0;
+    LK_B32 os_saves_zmm = 0;
+
+    __cpuid((int*) id0, 0);
+    LK_U32 max_function = id0[0];
+
+    //
+    // check OS feature support
+    //
+
+    if (max_function >= 1)
+    {
+        __cpuid((int*) id1, 1);
+
+        if (id1[2] & 0x8000000) // supports xgetbv
+        {
+            int a = (int) _xgetbv(0);
+            os_saves_ymm = ((a & 6) == 6) ? 1 : 0;
+            os_saves_zmm = (os_saves_ymm && ((a & 0xe0) == 0xe0)) ? 1 : 0;
+        }
+    }
+
+    if (max_function >= 7)
+    {
+        __cpuid((int*) id7, 7);
+    }
+
+    __cpuid((int*) id80000000, 0x80000000);
+    if (id80000000[0] >= 0x80000001)
+    {
+        __cpuid((int*) id80000001, 0x80000001);
+    }
+
+    //
+    // get vendor string
+    //
+
+    static char vendor[13];
+    *(LK_U32*) &vendor[0] = id0[1];
+    *(LK_U32*) &vendor[4] = id0[3];
+    *(LK_U32*) &vendor[8] = id0[2];
+    vendor[12] = 0;
+
+    lk_platform.system.vendor = vendor;
+
+    //
+    // get core/logical count
+    //
+
+    SYSTEM_INFO system_info;
+    GetSystemInfo(&system_info);
+    lk_platform.system.logical_count = system_info.dwNumberOfProcessors;
+
+    //
+    // get cache size
+    //
+
+    if (max_function >= 1)
+    {
+        lk_platform.system.cache_line_size = ((id1[1] >> 8) & 0xFF) * 8;
+    }
+
+    //
+    // check feature support
+    //
+
+    if (max_function >= 1)
+    {
+        lk_platform.system.has_rdtsc = (id1[3] & 0x00000010u) ? 1 : 0;
+        lk_platform.system.has_mmx   = (id1[3] & 0x00800000u) ? 1 : 0;
+        lk_platform.system.has_sse   = (id1[3] & 0x02000000u) ? 1 : 0;
+        lk_platform.system.has_sse2  = (id1[3] & 0x04000000u) ? 1 : 0;
+        lk_platform.system.has_hyperthreading = (id1[3] & 0x10000000u) ? 1 : 0;
+        lk_platform.system.has_sse3  = (id1[2] & 0x00000001u) ? 1 : 0;
+        lk_platform.system.has_sse41 = (id1[2] & 0x00080000u) ? 1 : 0;
+        lk_platform.system.has_sse42 = (id1[2] & 0x00100000u) ? 1 : 0;
+
+        if (os_saves_ymm)
+        {
+            lk_platform.system.has_avx = (id1[2] & 0x10000000u) ? 1 : 0;
+
+            if (max_function >= 7)
+            {
+                lk_platform.system.has_avx2    = (id7[1] & 0x00000020u) ? 1 : 0;
+                lk_platform.system.has_avx512f = (id7[1] & 0x00010000u) && os_saves_zmm;
+            }
+        }
+    }
+
+    if (id80000000[0] >= 0x80000001)
+    {
+        if (id80000001[3] & 0x80000000)
+        {
+            lk_platform.system.has_3dnow = 1;
+        }
+    }
+
+    //
+    // get memory info
+    //
+
+    MEMORYSTATUSEX memory_status;
+    memory_status.dwLength = sizeof(memory_status);
+    if (GlobalMemoryStatusEx(&memory_status))
+    {
+        lk_platform.system.ram_bytes     = memory_status.ullTotalPhys;
+        lk_platform.system.ram_kilobytes = memory_status.ullTotalPhys / 1024;
+        lk_platform.system.ram_megabytes = memory_status.ullTotalPhys / (1024 * 1024);
+    }
+
+/*
+    printf("vendor: %s\n", vendor);
+    printf("logical count: %d\n", lk_platform.system.logical_count);
+    printf("cache line size: %d\n", lk_platform.system.cache_line_size);
+    if (lk_platform.system.has_rdtsc) printf("rdtsc\n");
+    if (lk_platform.system.has_mmx) printf("mmx\n");
+    if (lk_platform.system.has_sse) printf("sse\n");
+    if (lk_platform.system.has_sse2) printf("sse2\n");
+    if (lk_platform.system.has_sse3) printf("sse3\n");
+    if (lk_platform.system.has_sse41) printf("sse41\n");
+    if (lk_platform.system.has_sse42) printf("sse42\n");
+    if (lk_platform.system.has_avx) printf("avx\n");
+    if (lk_platform.system.has_avx2) printf("avx2\n");
+    if (lk_platform.system.has_avx512f) printf("avx\n");
+    if (lk_platform.system.has_3dnow) printf("3dnow\n");
+    if (lk_platform.system.has_hyperthreading) printf("hyperthreading\n");
+    printf("RAM: %llu bytes (%llu MB)\n", lk_platform.system.ram_bytes, lk_platform.system.ram_megabytes);
+*/
+}
+
 static void lk_get_command_line_arguments()
 {
     LPWSTR command_line = GetCommandLineW();
@@ -2435,6 +2601,7 @@ static void lk_get_command_line_arguments()
 
 void lk_entry()
 {
+    lk_fill_system_info();
     lk_get_command_line_arguments();
 
 #ifndef LK_PLATFORM_NO_DLL
