@@ -269,6 +269,8 @@ typedef struct LK_Platform_Structure
         LK_B32 no_window;
         LK_Window_Backend backend;
 
+        void* handle; // HWND on Windows
+
         char* title;
 
         // During initialization, x and y will be set to LK_DEFAULT_POSITION, width and height will be set to zero.
@@ -1815,6 +1817,7 @@ static void lk_open_window()
     }
 
 
+    lk_platform.window.handle = window_handle;
     lk_private.window.handle = window_handle;
     lk_push();
 
@@ -2167,7 +2170,7 @@ static void lk_mix(LK_Platform* unused, LK_S16* output)
     ReleaseMutex(mutex);
 }
 
-static DWORD lk_audio_thread(LPVOID parameter)
+static DWORD CALLBACK lk_audio_thread(LPVOID parameter)
 {
     LPDIRECTSOUNDBUFFER secondary_buffer = lk_private.audio.secondary_buffer;
 
