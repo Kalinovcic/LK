@@ -135,7 +135,7 @@ extern "C"
 #define LK_REGION_DEFAULT_PAGE_SIZE 0x10000 /* 64 kB */
 #endif
 
-#include <WinBase.h>
+#include <windows.h>
 
 void* lk_region_os_alloc(size_t size)
 {
