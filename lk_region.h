@@ -122,6 +122,11 @@ void lk_region_rewind(LK_Region* region, LK_Region_Cursor* cursor);
 #ifndef LK_REGION_IMPLEMENTED
 #define LK_REGION_IMPLEMENTED
 
+#ifdef __cplusplus
+extern "C"
+{
+#endif
+
 #ifdef _WIN32
 /*********************************************************************************************
   Windows-specific
@@ -260,6 +265,10 @@ void lk_region_rewind(LK_Region* region, LK_Region_Cursor* cursor)
     region->cursor     = cursor->cursor;
     region->alloc_head = cursor->alloc_head;
 }
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* LK_REGION_IMPLEMENTED */
 #endif /* LK_REGION_IMPLEMENTATION */
