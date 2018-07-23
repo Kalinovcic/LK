@@ -251,8 +251,12 @@ void lk_region_cursor(LK_Region* region, LK_Region_Cursor* cursor)
 
 void lk_region_rewind(LK_Region* region, LK_Region_Cursor* cursor)
 {
+    void* new_page_end = cursor->page_end;
+    void* new_cursor = cursor->cursor;
+    void* new_alloc_head = cursor->alloc_head;
+
     void* memory = region->alloc_head;
-    while (memory != cursor->alloc_head)
+    while (memory != new_alloc_head)
     {
         void** header = (void**) memory;
         void* next_memory = *header;
@@ -261,9 +265,20 @@ void lk_region_rewind(LK_Region* region, LK_Region_Cursor* cursor)
         memory = next_memory;
     }
 
-    region->page_end   = cursor->page_end;
-    region->cursor     = cursor->cursor;
-    region->alloc_head = cursor->alloc_head;
+    SIZE_T size;
+    if (cursor->page_end == region->page_end)
+    {
+        size = (char*) region->cursor - (char*) new_cursor;
+    }
+    else
+    {
+        size = (char*) new_page_end - (char*) new_cursor;
+    }
+    ZeroMemory(new_cursor, size);
+
+    region->page_end   = new_page_end;
+    region->cursor     = new_cursor;
+    region->alloc_head = new_alloc_head;
 }
 
 #ifdef __cplusplus
