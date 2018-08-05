@@ -84,7 +84,13 @@ typedef LK__REGION_CACHE_ALIGN struct
        LK_Region region = {}; // C++11 */
 #define LK_RegionInit { 0, 0, 0, 0 }
 
+#ifdef LK_REGION_COLLECT_CALLER_INFO
+#define lk_region_alloc(...) (lk_region_alloc_(__VA_ARGS__, __FUNCTION__))
+void* lk_region_alloc_(LK_Region* region, size_t size, size_t alignment, const char* caller_name);
+#else
 void* lk_region_alloc(LK_Region* region, size_t size, size_t alignment);
+#endif
+
 void lk_region_free(LK_Region* region);
 
 /* Helper macros. */
@@ -127,6 +133,9 @@ extern "C"
 {
 #endif
 
+void* lk_region_os_alloc(size_t size, const char* caller_name);
+void lk_region_os_free(void* memory);
+
 #ifdef _WIN32
 /*********************************************************************************************
   Windows-specific
@@ -137,7 +146,9 @@ extern "C"
 
 #include <windows.h>
 
-void* lk_region_os_alloc(size_t size)
+#ifndef LK_REGION_CUSTOM_PAGE_ALLOCATOR
+
+void* lk_region_os_alloc(size_t size, const char* caller_name)
 {
     return VirtualAlloc(0, size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
 }
@@ -147,6 +158,8 @@ void lk_region_os_free(void* memory)
     VirtualFree(memory, 0, MEM_RELEASE);
 }
 
+#endif
+
 #else
 #error Unrecognized operating system
 #endif
@@ -155,8 +168,15 @@ void lk_region_os_free(void* memory)
   Cross-platform
  *********************************************************************************************/
 
+#ifdef LK_REGION_COLLECT_CALLER_INFO
+void* lk_region_alloc_(LK_Region* region, size_t size, size_t alignment, const char* caller_name)
+{
+#else
 void* lk_region_alloc(LK_Region* region, size_t size, size_t alignment)
 {
+    const char* caller_name = NULL;
+#endif
+
     typedef uint8_t byte;
     typedef uintptr_t umm;
 
@@ -175,7 +195,7 @@ void* lk_region_alloc(LK_Region* region, size_t size, size_t alignment)
         if (alignment < sizeof(void*))
             alignment = sizeof(void*);
 
-        byte* page = (byte*) lk_region_os_alloc(size + alignment);
+        byte* page = (byte*) lk_region_os_alloc(size + alignment, caller_name);
 
         void** header = (void**) page;
         *header = region->alloc_head;
@@ -197,7 +217,7 @@ void* lk_region_alloc(LK_Region* region, size_t size, size_t alignment)
     if (end_address > (umm) region->page_end)
     {
         /* allocate another page */
-        byte* page = (byte*) lk_region_os_alloc(page_size);
+        byte* page = (byte*) lk_region_os_alloc(page_size, caller_name);
         byte* page_end = page + page_size;
 
         void** header = (void**) page;
