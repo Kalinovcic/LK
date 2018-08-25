@@ -424,6 +424,7 @@ extern "C"
 #include <windows.h> // @Incomplete - get rid of this include
 #include <dsound.h> // @Incomplete - get rid of this include
 #include <dwmapi.h> // @Incomplete - get rid of this include
+#include <intrin.h> // @Incomplete - get rid of this include
 
 
 typedef void LK_Client_Init_Function(LK_Platform* platform);
@@ -432,6 +433,11 @@ typedef void LK_Client_Frame_Function(LK_Platform* platform);
 typedef void LK_Client_Audio_Function(LK_Platform* platform, LK_S16* samples);
 typedef void LK_Client_Dll_Load_Function(LK_Platform* platform);
 typedef void LK_Client_Dll_Unload_Function(LK_Platform* platform);
+
+typedef HGLRC WGLCreateContext(HDC hdc);
+typedef BOOL WGLDeleteContext(HGLRC hglrc);
+typedef BOOL WGLMakeCurrent(HDC hdc, HGLRC hglrc);
+typedef PROC WGLGetProcAddress(LPCSTR name);
 
 typedef BOOL WGLChoosePixelFormatARB(HDC hdc, const int *piAttribIList, const FLOAT *pfAttribFList, UINT nMaxFormats, int *piFormats, UINT *nNumFormats);
 typedef HGLRC WGLCreateContextAttribsARB(HDC hDC, HGLRC hShareContext, const int* attribList);
@@ -517,6 +523,13 @@ typedef struct
 
     struct
     {
+        HMODULE library;
+
+        WGLCreateContext*  wglCreateContext;
+        WGLDeleteContext*  wglDeleteContext;
+        WGLMakeCurrent*    wglMakeCurrent;
+        WGLGetProcAddress* wglGetProcAddress;
+
         HGLRC context;
         WGLChoosePixelFormatARB* wglChoosePixelFormatARB;
         WGLCreateContextAttribsARB* wglCreateContextAttribsARB;
@@ -1511,8 +1524,41 @@ static void lk_set_window_icon(HWND window, HDC dc)
     }
 }
 
+static void lk_load_opengl_library()
+{
+    HMODULE library = LoadLibraryA("opengl32.dll");
+    if (library == 0)
+    {
+        /* @Incomplete - logging */
+        return;
+    }
+
+    lk_private.opengl.library = library;
+
+    #define LK_GetOpenGLFunction(type, name)         \
+    {                                                \
+        void* proc = GetProcAddress(library, #name); \
+        if (!proc)                                   \
+        {                                            \
+            /* @Incomplete - logging */              \
+        }                                            \
+        lk_private.opengl.name = (type*) proc;       \
+    }
+
+    LK_GetOpenGLFunction(WGLCreateContext,  wglCreateContext );
+    LK_GetOpenGLFunction(WGLDeleteContext,  wglDeleteContext );
+    LK_GetOpenGLFunction(WGLMakeCurrent,    wglMakeCurrent   );
+    LK_GetOpenGLFunction(WGLGetProcAddress, wglGetProcAddress);
+
+    #undef LK_GetOpenGLFunction
+}
+
 static void lk_create_legacy_opengl_context(HINSTANCE instance)
 {
+    WGLCreateContext* wglCreateContext = lk_private.opengl.wglCreateContext;
+    WGLDeleteContext* wglDeleteContext = lk_private.opengl.wglDeleteContext;
+    WGLMakeCurrent*   wglMakeCurrent   = lk_private.opengl.wglMakeCurrent;
+
     HWND window = lk_private.window.handle;
     HDC dc = lk_private.window.dc;
 
@@ -1560,6 +1606,11 @@ static void lk_create_legacy_opengl_context(HINSTANCE instance)
 
 static int lk_create_modern_opengl_context(HINSTANCE instance)
 {
+    WGLCreateContext*  wglCreateContext  = lk_private.opengl.wglCreateContext;
+    WGLDeleteContext*  wglDeleteContext  = lk_private.opengl.wglDeleteContext;
+    WGLMakeCurrent*    wglMakeCurrent    = lk_private.opengl.wglMakeCurrent;
+    WGLGetProcAddress* wglGetProcAddress = lk_private.opengl.wglGetProcAddress;
+
     HWND fake_window = CreateWindowExW(0, LK_WINDOW_CLASS_NAME, L"fake window", 0, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, 0, 0, instance, 0);
     if (!fake_window)
     {
@@ -1851,6 +1902,8 @@ static void lk_open_window()
     LK_B32 use_opengl = (lk_private.window.backend == LK_WINDOW_OPENGL);
     if (use_opengl)
     {
+        lk_load_opengl_library();
+
         if (!lk_create_modern_opengl_context(instance))
         {
             lk_create_legacy_opengl_context(instance);
@@ -1918,8 +1971,8 @@ static void lk_close_window()
 
     if (context)
     {
-        wglMakeCurrent(0, 0);
-        wglDeleteContext(context);
+        lk_private.opengl.wglMakeCurrent(0, 0);
+        lk_private.opengl.wglDeleteContext(context);
     }
 
     if (dc)
