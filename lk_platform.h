@@ -45,6 +45,10 @@ If you're doing audio output using the LK_AUDIO_CALLBACK strategy, you should ex
     LK_CLIENT_EXPORT void lk_client_audio(LK_Platform* platform, LK_S16* samples);  // called every so often on a separate thread,
                                                                                        you should fill out the samples array
 
+If you want lk_platform to use your logging API, you should expose:
+
+    LK_CLIENT_EXPORT void lk_client_log(LK_Platform* platform, const char* message, const char* file, int line);
+
 The platform pointer that's passed in all of the functions is unique and never changes during the lifetime of the application.
 If you're using dynamic DLL loading, all of your global variables WILL BE DESTROYED after the DLL gets unloaded.
 You can keep a pointer to persistent storage in platform->client_data.
@@ -440,6 +444,7 @@ typedef void LK_Client_Init_Function(LK_Platform* platform);
 typedef void LK_Client_Close_Function(LK_Platform* platform);
 typedef void LK_Client_Frame_Function(LK_Platform* platform);
 typedef void LK_Client_Audio_Function(LK_Platform* platform, LK_S16* samples);
+typedef void LK_Client_Log(LK_Platform* platform, const char* message, const char* file, int line);
 typedef void LK_Client_Dll_Load_Function(LK_Platform* platform);
 typedef void LK_Client_Dll_Unload_Function(LK_Platform* platform);
 
@@ -489,6 +494,7 @@ typedef struct
         LK_Client_Close_Function* close;
         LK_Client_Frame_Function* frame;
         LK_Client_Audio_Function* audio;
+        LK_Client_Log* log;
         LK_Client_Dll_Load_Function* dll_load;
         LK_Client_Dll_Unload_Function* dll_unload;
 
@@ -571,6 +577,9 @@ static LK_Platform lk_platform;
 static LK_Platform_Private lk_private;
 
 
+#define LK_Log(message)  lk_private.client.log(&lk_platform, message, __FILE__, __LINE__)
+
+
 static void lk_client_init_stub(LK_Platform* platform) {}
 static void lk_client_frame_stub(LK_Platform* platform) {}
 static void lk_client_close_stub(LK_Platform* platform) {}
@@ -582,29 +591,40 @@ static void lk_client_audio_stub(LK_Platform* platform, LK_S16* samples)
     ZeroMemory(samples, platform->audio.sample_count * platform->audio.channels * 2);
 }
 
-#ifdef LK_PLATFORM_NO_DLL
-
-static void lk_set_client_functions()
+static void lk_client_log_stub(LK_Platform* platform, const char* message, const char* file, int line)
 {
-    HMODULE module = GetModuleHandle(NULL);
-    lk_private.client.library = module;
+    OutputDebugStringA(message);
+}
 
+static void lk_load_client_functions_from_module(HMODULE module)
+{
+    lk_private.client.init       = lk_client_init_stub;
+    lk_private.client.close      = lk_client_close_stub;
+    lk_private.client.frame      = lk_client_frame_stub;
+    lk_private.client.audio      = lk_client_audio_stub;
+    lk_private.client.log        = lk_client_log_stub;
+    lk_private.client.dll_load   = lk_client_dll_load_stub;
+    lk_private.client.dll_unload = lk_client_dll_unload_stub;
+
+    lk_private.client.library = module;
     if (module)
     {
-        #define LK_GetClientFunction(ptr, type, name)    \
-            ptr = (type*) GetProcAddress(module, #name); \
-            if (!ptr)                                    \
-            {                                            \
-                /* @Incomplete - logging */              \
-                ptr = name##_stub;                       \
-            }
+        lk_private.client.load_failed = 0;
 
-        LK_GetClientFunction(lk_private.client.init,       LK_Client_Init_Function,       lk_client_init);
-        LK_GetClientFunction(lk_private.client.close,      LK_Client_Close_Function,      lk_client_close);
-        LK_GetClientFunction(lk_private.client.frame,      LK_Client_Frame_Function,      lk_client_frame);
-        LK_GetClientFunction(lk_private.client.audio,      LK_Client_Audio_Function,      lk_client_audio);
-        LK_GetClientFunction(lk_private.client.dll_load,   LK_Client_Dll_Load_Function,   lk_client_dll_load);
-        LK_GetClientFunction(lk_private.client.dll_unload, LK_Client_Dll_Unload_Function, lk_client_dll_unload);
+        #define LK_GetClientFunction(name)                             \
+        {                                                              \
+            FARPROC proc = GetProcAddress(module, "lk_client_" #name); \
+            if (proc)                                                  \
+                *(FARPROC*) &lk_private.client.name = proc;            \
+        }
+
+        LK_GetClientFunction(init);
+        LK_GetClientFunction(close);
+        LK_GetClientFunction(frame);
+        LK_GetClientFunction(audio);
+        LK_GetClientFunction(log);
+        LK_GetClientFunction(dll_load);
+        LK_GetClientFunction(dll_unload);
 
         #undef LK_GetClientFunction
 
@@ -612,14 +632,17 @@ static void lk_set_client_functions()
     }
     else
     {
-        /* @Incomplete - logging */
-        lk_private.client.init       = lk_client_init_stub;
-        lk_private.client.close      = lk_client_close_stub;
-        lk_private.client.frame      = lk_client_frame_stub;
-        lk_private.client.audio      = lk_client_audio_stub;
-        lk_private.client.dll_load   = lk_client_dll_load_stub;
-        lk_private.client.dll_unload = lk_client_dll_unload_stub;
+        lk_private.client.load_failed = 1;
+        LK_Log("Failed to load the client module.");
     }
+}
+
+#ifdef LK_PLATFORM_NO_DLL
+
+static void lk_set_client_functions()
+{
+    HMODULE module = GetModuleHandle(NULL);
+    lk_load_client_functions_from_module(module);
 }
 
 #else
@@ -725,47 +748,11 @@ static void lk_load_client()
 
     if (!CopyFileA(dll_path, temp_dll_path, 0))
     {
-        /* @Incomplete - logging */
+        LK_Log("Failed to copy the client DLL to a temporary location.");
     }
 
     HMODULE library = LoadLibraryA(temp_dll_path);
-    lk_private.client.library = library;
-
-    if (library)
-    {
-        lk_private.client.load_failed = 0;
-
-        #define LK_GetClientFunction(ptr, type, name)     \
-            ptr = (type*) GetProcAddress(library, #name); \
-            if (!ptr)                                     \
-            {                                             \
-                /* @Incomplete - logging */               \
-                ptr = name##_stub;                        \
-            }
-
-        LK_GetClientFunction(lk_private.client.init,       LK_Client_Init_Function,       lk_client_init);
-        LK_GetClientFunction(lk_private.client.close,      LK_Client_Close_Function,      lk_client_close);
-        LK_GetClientFunction(lk_private.client.frame,      LK_Client_Frame_Function,      lk_client_frame);
-        LK_GetClientFunction(lk_private.client.audio,      LK_Client_Audio_Function,      lk_client_audio);
-        LK_GetClientFunction(lk_private.client.dll_load,   LK_Client_Dll_Load_Function,   lk_client_dll_load);
-        LK_GetClientFunction(lk_private.client.dll_unload, LK_Client_Dll_Unload_Function, lk_client_dll_unload);
-
-        #undef LK_GetClientFunction
-
-        lk_private.client.dll_load(&lk_platform);
-    }
-    else
-    {
-        /* @Incomplete - logging */
-        lk_private.client.load_failed = 1;
-
-        lk_private.client.init       = lk_client_init_stub;
-        lk_private.client.close      = lk_client_close_stub;
-        lk_private.client.frame      = lk_client_frame_stub;
-        lk_private.client.audio      = lk_client_audio_stub;
-        lk_private.client.dll_load   = lk_client_dll_load_stub;
-        lk_private.client.dll_unload = lk_client_dll_unload_stub;
-    }
+    lk_load_client_functions_from_module(library);
 }
 
 static void lk_unload_client()
@@ -776,7 +763,7 @@ static void lk_unload_client()
 
         if (!FreeLibrary(lk_private.client.library))
         {
-            /* @Incomplete - logging */
+            LK_Log("Failed to release the client DLL.");
         }
 
         lk_private.client.library = 0;
@@ -1393,7 +1380,7 @@ static void lk_fill_default_window_settings(HINSTANCE instance)
         }
         else
         {
-            /* @Incomplete - logging */
+            LK_Log("Failed to set the default window size; couldn't create a temporary window.");
         }
 
         LK_U32 width = client_rect.right - client_rect.left;
@@ -1431,7 +1418,7 @@ static void lk_fill_default_window_settings(HINSTANCE instance)
         }
         else
         {
-            /* @Incomplete - logging */
+            LK_Log("Failed to set the default window position; couldn't get the screen size.");
         }
 
         if (default_x) lk_platform.window.x = x;
@@ -1486,7 +1473,7 @@ static void lk_enable_window_transparency(HMODULE dwmapi, HWND window)
     DwmExtendFrameIntoClientArea = (LK_DwmExtendFrameIntoClientArea*) GetProcAddress(dwmapi, "DwmExtendFrameIntoClientArea");
     if (!DwmEnableBlurBehindWindow || !DwmExtendFrameIntoClientArea)
     {
-        /* @Incomplete - logging */
+        LK_Log("Failed to enable window transparency; missing DwmApi functions.");
         return;
     }
 
@@ -1559,7 +1546,7 @@ static void lk_set_window_icon(HWND window, HDC dc)
             }
             else
             {
-                /* @Incomplete - logging */
+                LK_Log("Failed to set the window icon; couldn't create the icon.");
                 return;
             }
 
@@ -1567,7 +1554,7 @@ static void lk_set_window_icon(HWND window, HDC dc)
         }
         else
         {
-            /* @Incomplete - logging */
+            LK_Log("Failed to set the window icon; couldn't create the bitmap.");
             return;
         }
 
@@ -1575,33 +1562,38 @@ static void lk_set_window_icon(HWND window, HDC dc)
     }
 }
 
-static void lk_load_opengl_library()
+static int lk_load_opengl_library()
 {
     HMODULE library = LoadLibraryA("opengl32.dll");
     if (library == 0)
     {
-        /* @Incomplete - logging */
-        return;
+        LK_Log("Failed to create an OpenGL context; couldn't load OpenGL32.dll.");
+        return 0;
     }
 
     lk_private.opengl.library = library;
 
-    #define LK_GetOpenGLFunction(type, name)         \
-    {                                                \
-        void* proc = GetProcAddress(library, #name); \
-        if (!proc)                                   \
-        {                                            \
-            /* @Incomplete - logging */              \
-        }                                            \
-        lk_private.opengl.name = (type*) proc;       \
+    #define LK_GetOpenGLFunction(name)                   \
+    {                                                    \
+        FARPROC proc = GetProcAddress(library, #name);   \
+        if (!proc)                                       \
+        {                                                \
+            LK_Log("Failed to create an OpenGL context;" \
+                  " couldn't find " #name "() in"        \
+                  " OpenGL32.dll.");                     \
+            return 0;                                    \
+        }                                                \
+        *(FARPROC*) &lk_private.opengl.name = proc;      \
     }
 
-    LK_GetOpenGLFunction(WGLCreateContext,  wglCreateContext );
-    LK_GetOpenGLFunction(WGLDeleteContext,  wglDeleteContext );
-    LK_GetOpenGLFunction(WGLMakeCurrent,    wglMakeCurrent   );
-    LK_GetOpenGLFunction(WGLGetProcAddress, wglGetProcAddress);
+    LK_GetOpenGLFunction(wglCreateContext );
+    LK_GetOpenGLFunction(wglDeleteContext );
+    LK_GetOpenGLFunction(wglMakeCurrent   );
+    LK_GetOpenGLFunction(wglGetProcAddress);
 
     #undef LK_GetOpenGLFunction
+
+    return 1;
 }
 
 static void lk_create_legacy_opengl_context(HINSTANCE instance)
@@ -1627,13 +1619,13 @@ static void lk_create_legacy_opengl_context(HINSTANCE instance)
     int pixel_format = ChoosePixelFormat(dc, &pixel_format_desc);
     if (pixel_format == 0)
     {
-        /* @Incomplete - logging */
+        LK_Log("Failed to create a legacy OpenGL context; ChoosePixelFormat() failed.");
         return;
     }
 
     if (!SetPixelFormat(dc, pixel_format, &pixel_format_desc))
     {
-        /* @Incomplete - logging */
+        LK_Log("Failed to create a legacy OpenGL context; SetPixelFormat() failed.");
         return;
     }
 
@@ -1641,13 +1633,13 @@ static void lk_create_legacy_opengl_context(HINSTANCE instance)
 
     if (!context)
     {
-        /* @Incomplete - logging */
+        LK_Log("Failed to create a legacy OpenGL context; wglCreateContext() failed.");
         return;
     }
 
     if (!wglMakeCurrent(dc, context))
     {
-        /* @Incomplete - logging */
+        LK_Log("Failed to create a legacy OpenGL context; wglMakeCurrent() failed.");
         wglDeleteContext(context);
         return;
     }
@@ -1672,14 +1664,14 @@ static int lk_create_modern_opengl_context(HINSTANCE instance)
     fake_window = CreateWindowExW(0, LK_WINDOW_CLASS_NAME, L"fake window", 0, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, 0, 0, instance, 0);
     if (!fake_window)
     {
-        /* @Incomplete - logging */
+        LK_Log("Failed to create a modern OpenGL context; CreateWindowEx() failed.");
         return 0;
     }
 
     fake_dc = GetDC(fake_window);
     if (!fake_dc)
     {
-        /* @Incomplete - logging */
+        LK_Log("Failed to create a modern OpenGL context; GetDC() failed.");
         goto undo_fake_window;
     }
 
@@ -1695,13 +1687,13 @@ static int lk_create_modern_opengl_context(HINSTANCE instance)
     fake_pixel_format = ChoosePixelFormat(fake_dc, &fake_pixel_format_desc);
     if (fake_pixel_format == 0)
     {
-        /* @Incomplete - logging */
+        LK_Log("Failed to create a modern OpenGL context; ChoosePixelFormat() failed.");
         goto undo_fake_dc;
     }
 
     if (!SetPixelFormat(fake_dc, fake_pixel_format, &fake_pixel_format_desc))
     {
-        /* @Incomplete - logging */
+        LK_Log("Failed to create a modern OpenGL context; SetPixelFormat() failed.");
         goto undo_fake_dc;
     }
 
@@ -1709,13 +1701,13 @@ static int lk_create_modern_opengl_context(HINSTANCE instance)
 
     if (!fake_context)
     {
-        /* @Incomplete - logging */
+        LK_Log("Failed to create a modern OpenGL context; wglCreateContext() failed.");
         goto undo_fake_dc;
     }
 
     if (!wglMakeCurrent(fake_dc, fake_context))
     {
-        /* @Incomplete - logging */
+        LK_Log("Failed to create a modern OpenGL context; wglMakeCurrent() failed.");
         goto undo_fake_context;
     }
 
@@ -1793,26 +1785,26 @@ static int lk_create_modern_opengl_context(HINSTANCE instance)
         UINT pixel_format_count;
         if (!lk_private.opengl.wglChoosePixelFormatARB(dc, pixel_format_attributes, 0, 1, &pixel_format, &pixel_format_count))
         {
-            /* @Incomplete - logging */
+            LK_Log("Failed to create a modern OpenGL context; wglChoosePixelFormatARB() failed.");
             goto undo_fake_context;
         }
 
         if (pixel_format_count == 0)
         {
-            /* @Incomplete - logging */
+            LK_Log("Failed to create a modern OpenGL context; couldn't choose the appropriate pixel format.");
             goto undo_fake_context;
         }
 
         PIXELFORMATDESCRIPTOR pixel_format_desc;
         if (!DescribePixelFormat(dc, pixel_format, sizeof(PIXELFORMATDESCRIPTOR), &pixel_format_desc))
         {
-            /* @Incomplete - logging */
+            LK_Log("Failed to create a modern OpenGL context; DescribePixelFormat() failed.");
             goto undo_fake_context;
         }
 
         if (!SetPixelFormat(dc, pixel_format, &pixel_format_desc))
         {
-            /* @Incomplete - logging */
+            LK_Log("Failed to create a modern OpenGL context; SetPixelFormat() failed.");
             goto undo_fake_context;
         }
 
@@ -1864,7 +1856,7 @@ static int lk_create_modern_opengl_context(HINSTANCE instance)
 
         if (!real_context)
         {
-            /* @Incomplete - logging */
+            LK_Log("Failed to create a modern OpenGL context; wglCreateContextAttribsARB() failed.");
             goto undo_fake_context;
         }
 
@@ -1875,7 +1867,7 @@ static int lk_create_modern_opengl_context(HINSTANCE instance)
 
         if (!wglMakeCurrent(dc, real_context))
         {
-            /* @Incomplete - logging */
+            LK_Log("Failed to create a modern OpenGL context; wglMakeCurrent() failed.");
             goto undo_real_context;
         }
 
@@ -1915,7 +1907,7 @@ static void lk_open_window()
 
     if (!RegisterClassExW(&window_class))
     {
-        /* @Incomplete - logging */
+        LK_Log("Failed to open a window; RegisterClassEx() failed.");
         return;
     }
 
@@ -1927,7 +1919,7 @@ static void lk_open_window()
 
     if (!window_handle)
     {
-        /* @Incomplete - logging */
+        LK_Log("Failed to open a window; CreateWindowEx() failed.");
         return;
     }
 
@@ -1969,7 +1961,7 @@ static void lk_open_window()
 
     if (!dc)
     {
-        /* @Incomplete - logging */
+        LK_Log("Failed to open a window; GetDC() failed.");
         return;
     }
 
@@ -1983,11 +1975,12 @@ static void lk_open_window()
     LK_B32 use_opengl = (lk_private.window.backend == LK_WINDOW_OPENGL);
     if (use_opengl)
     {
-        lk_load_opengl_library();
-
-        if (!lk_create_modern_opengl_context(instance))
+        if (lk_load_opengl_library())
         {
-            lk_create_legacy_opengl_context(instance);
+            if (!lk_create_modern_opengl_context(instance))
+            {
+                lk_create_legacy_opengl_context(instance);
+            }
         }
     }
     else
@@ -2004,13 +1997,13 @@ static void lk_open_window()
         int pixel_format = ChoosePixelFormat(dc, &pixel_format_desc);
         if (!pixel_format)
         {
-            /* @Incomplete - logging */
+            LK_Log("Failed to open a window; ChoosePixelFormat() failed.");
             return;
         }
 
         if (!SetPixelFormat(dc, pixel_format, &pixel_format_desc))
         {
-            /* @Incomplete - logging */
+            LK_Log("Failed to open a window; SetPixelFormat() failed.");
             return;
         }
     }
@@ -2027,7 +2020,7 @@ static void lk_open_window()
     raw_input_mouse.hwndTarget = window_handle;
     if (!RegisterRawInputDevices(&raw_input_mouse, 1, sizeof(raw_input_mouse)))
     {
-        /* @Incomplete - logging */
+        LK_Log("Failed to register the mouse input device; the window won't receive mouse events.");
         return;
     }
 
@@ -2038,7 +2031,7 @@ static void lk_open_window()
     raw_input_keyboard.hwndTarget = window_handle;
     if (!RegisterRawInputDevices(&raw_input_keyboard, 1, sizeof(raw_input_keyboard)))
     {
-        /* @Incomplete - logging */
+        LK_Log("Failed to register the keybaord input device; the window won't receive keyboard events.");
         return;
     }
 }
@@ -2322,7 +2315,7 @@ static DWORD CALLBACK lk_audio_thread(LPVOID parameter)
         DWORD write_cursor;
         if (!SUCCEEDED(IDirectSoundBuffer_GetCurrentPosition(secondary_buffer, &play_cursor, &write_cursor)))
         {
-            /* @Incomplete - logging */
+            LK_Log("Audio thread: DirectSoundBuffer.GetCurrentPosition() failed.");
         }
 
         LK_U32 buffer_index = (write_cursor / sample_buffer_size) + 1;
@@ -2337,7 +2330,8 @@ static DWORD CALLBACK lk_audio_thread(LPVOID parameter)
         LK_U32 expected_buffer_index = (last_buffer_index + 1) % sample_buffer_count;
         if (buffer_index != expected_buffer_index)
         {
-            /* @Incomplete - logging, missed a buffer */
+            // @Reconsider - Commented this warning out. This happens frequently on app startup and it's annoying.
+            // LK_Log("Warning: The audio thread is too slow! Missed a buffer...");
         }
 
         last_buffer_index = buffer_index;
@@ -2355,11 +2349,6 @@ static DWORD CALLBACK lk_audio_thread(LPVOID parameter)
             }
             else
             {
-                if (strategy != LK_AUDIO_MIXER)
-                {
-                    /* @Incomplete - logging */
-                }
-
                 lk_mix(&lk_platform, buffer);
             }
 
@@ -2370,7 +2359,7 @@ static DWORD CALLBACK lk_audio_thread(LPVOID parameter)
         {
             if (!SUCCEEDED(IDirectSoundBuffer_Play(secondary_buffer, 0, 0, DSBPLAY_LOOPING)))
             {
-                /* @Incomplete - logging */
+                LK_Log("Audio thread: DirectSoundBuffer.Play() failed.");
             }
 
             playing = 1;
@@ -2382,7 +2371,7 @@ static void lk_initialize_audio()
 {
     if (lk_platform.window.no_window)
     {
-        /* @Incomplete - logging */
+        LK_Log("The audio system requires an open window, but the client specified 'no_window'. The client won't get audio.");
         lk_platform.audio.strategy = LK_NO_AUDIO;
         return;
     }
@@ -2391,7 +2380,7 @@ static void lk_initialize_audio()
     HMODULE dsound = LoadLibraryA("dsound.dll");
     if (!dsound)
     {
-        /* @Incomplete - logging */
+        LK_Log("Failed to initialize audio; couldn't load dsound.dll.");
         lk_platform.audio.strategy = LK_NO_AUDIO;
         return;
     }
@@ -2402,7 +2391,7 @@ static void lk_initialize_audio()
     direct_sound_create = (LK_DirectSoundCreate*) GetProcAddress(dsound, "DirectSoundCreate");
     if (!direct_sound_create)
     {
-        /* @Incomplete - logging */
+        LK_Log("Failed to initialize audio; couldn't find DirectSoundCreate() in dsound.dll.");
         lk_platform.audio.strategy = LK_NO_AUDIO;
         return;
     }
@@ -2410,7 +2399,7 @@ static void lk_initialize_audio()
     LPDIRECTSOUND direct_sound;
     if (!SUCCEEDED(direct_sound_create(0, &direct_sound, 0)))
     {
-        /* @Incomplete - logging */
+        LK_Log("Failed to initialize audio; DirectSoundCreate() failed.");
         lk_platform.audio.strategy = LK_NO_AUDIO;
         return;
     }
@@ -2418,7 +2407,7 @@ static void lk_initialize_audio()
     HWND window = lk_private.window.handle;
     if (!SUCCEEDED(IDirectSound_SetCooperativeLevel(direct_sound, window, DSSCL_PRIORITY)))
     {
-        /* @Incomplete - logging */
+        LK_Log("Failed to initialize audio; DirectSound.SetCooperativeLevel() failed.");
         lk_platform.audio.strategy = LK_NO_AUDIO;
         return;
     }
@@ -2468,14 +2457,14 @@ static void lk_initialize_audio()
 
         if (!SUCCEEDED(IDirectSound_CreateSoundBuffer(direct_sound, &description, &primary_buffer, 0)))
         {
-            /* @Incomplete - logging */
+            LK_Log("Failed to initialize audio; DirectSound.CreateSoundBuffer() failed for the primary buffer.");
             lk_platform.audio.strategy = LK_NO_AUDIO;
             return;
         }
 
         if (!SUCCEEDED(IDirectSoundBuffer_SetFormat(primary_buffer, &format)))
         {
-            /* @Incomplete - logging */
+            LK_Log("Failed to initialize audio; DirectSound.SetFormat() failed for the primary buffer.");
             lk_platform.audio.strategy = LK_NO_AUDIO;
             return;
         }
@@ -2499,7 +2488,7 @@ static void lk_initialize_audio()
 
         if (!SUCCEEDED(IDirectSound_CreateSoundBuffer(direct_sound, &description, &secondary_buffer, 0)))
         {
-            /* @Incomplete - logging */
+            LK_Log("Failed to initialize audio; DirectSound.CreateSoundBuffer() failed for the secondary buffer.");
             lk_platform.audio.strategy = LK_NO_AUDIO;
             return;
         }
@@ -2516,8 +2505,12 @@ static void lk_initialize_audio()
 
             if (!SUCCEEDED(IDirectSoundBuffer_Unlock(secondary_buffer, buffer1, buffer1_size, buffer2, buffer2_size)))
             {
-                /* @Incomplete - logging */
+                LK_Log("Warning: DirectSoundBuffer.Unlock() failed while initializing audio.");
             }
+        }
+        else
+        {
+            LK_Log("Warning: DirectSoundBuffer.Lock() failed while initializing audio.");
         }
     }
 
@@ -2530,7 +2523,7 @@ static void lk_initialize_audio()
 
         if (!mutex)
         {
-            /* @Incomplete - logging */
+            LK_Log("Failed to initialize the audio mixer; couldn't create a mutex object.");
             lk_platform.audio.strategy = LK_NO_AUDIO;
             return;
         }
