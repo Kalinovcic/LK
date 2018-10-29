@@ -102,6 +102,7 @@ typedef enum
 {
     LK_WINDOW_CANVAS,
     LK_WINDOW_OPENGL,
+    LK_WINDOW_CUSTOM,
 } LK_Window_Backend;
 
 typedef struct
@@ -289,6 +290,10 @@ typedef struct LK_Platform_Structure
         LK_B32 invisible;
         LK_B32 disable_animations;
 
+        // Changing 'transparent' during execution (after initialization) doesn't have an effect.
+        // Transparency on Windows is only available for undecorated windows.
+        LK_B32 transparent;
+
         // The icon is set once, when the window is created, if icon_pixels is set.
         LK_U32 icon_width;
         LK_U32 icon_height;
@@ -420,10 +425,14 @@ extern "C"
 #define LK_WINDOW_CLASS_NAME L"lk_platform_window_class"
 #endif
 
+#if !defined(_WIN32_WINNT) && !defined(WINVER)
+// Targeting Windows XP by default.
+#define _WIN32_WINNT 0x0501
+#define WINVER 0x0501
+#endif
 
 #include <windows.h> // @Incomplete - get rid of this include
 #include <dsound.h> // @Incomplete - get rid of this include
-#include <dwmapi.h> // @Incomplete - get rid of this include
 #include <intrin.h> // @Incomplete - get rid of this include
 
 
@@ -1284,7 +1293,7 @@ lk_window_callback(HWND window, UINT message, WPARAM wparam, LPARAM lparam)
 
             EndPaint(window, &paint);
         }
-        
+
         goto run_default_proc;
     } break;
 
@@ -1430,28 +1439,70 @@ static void lk_fill_default_window_settings(HINSTANCE instance)
     }
 }
 
-static void lk_disable_window_animations(HWND window)
+static void lk_disable_window_animations(HMODULE dwmapi, HWND window)
 {
-    HMODULE dwmapi = LoadLibraryA("dwmapi.dll");
-    if (dwmapi)
-    {
-        typedef HRESULT LK_DwmSetWindowAttribute(HWND, DWORD, LPCVOID, DWORD);
-        LK_DwmSetWindowAttribute* DwmSetWindowAttribute;
+    const DWORD DWMWA_TRANSITIONS_FORCEDISABLED = 2;
 
-        DwmSetWindowAttribute = (LK_DwmSetWindowAttribute*) GetProcAddress(dwmapi, "DwmSetWindowAttribute");
-        if (DwmSetWindowAttribute)
-        {
-            BOOL disable = TRUE;
-            DwmSetWindowAttribute(window, DWMWA_TRANSITIONS_FORCEDISABLED, &disable, sizeof(disable));
-        }
+    typedef HRESULT LK_DwmSetWindowAttribute(HWND, DWORD, LPCVOID, DWORD);
+    LK_DwmSetWindowAttribute* DwmSetWindowAttribute;
 
-        FreeLibrary(dwmapi);
-    }
-    else
+    DwmSetWindowAttribute = (LK_DwmSetWindowAttribute*) GetProcAddress(dwmapi, "DwmSetWindowAttribute");
+    if (DwmSetWindowAttribute)
     {
-        /* @Incomplete - logging */
+        BOOL disable = TRUE;
+
+        DwmSetWindowAttribute(window, DWMWA_TRANSITIONS_FORCEDISABLED, &disable, sizeof(disable));
     }
 }
+
+static void lk_enable_window_transparency(HMODULE dwmapi, HWND window)
+{
+    const DWORD LK_DWM_BB_ENABLE = 1;
+
+    typedef struct
+    {
+        DWORD dwFlags;
+        BOOL  fEnable;
+        HRGN  hRgnBlur;
+        BOOL  fTransitionOnMaximized;
+    } DWM_BLURBEHIND;
+
+    typedef struct
+    {
+        int cxLeftWidth;
+        int cxRightWidth;
+        int cyTopHeight;
+        int cyBottomHeight;
+    } MARGINS;
+
+    typedef HRESULT LK_DwmEnableBlurBehindWindow(HWND, DWM_BLURBEHIND*);
+    typedef HRESULT LK_DwmExtendFrameIntoClientArea(HWND, MARGINS*);
+
+
+    LK_DwmEnableBlurBehindWindow* DwmEnableBlurBehindWindow;
+    LK_DwmExtendFrameIntoClientArea* DwmExtendFrameIntoClientArea;
+
+    DwmEnableBlurBehindWindow = (LK_DwmEnableBlurBehindWindow*) GetProcAddress(dwmapi, "DwmEnableBlurBehindWindow");
+    DwmExtendFrameIntoClientArea = (LK_DwmExtendFrameIntoClientArea*) GetProcAddress(dwmapi, "DwmExtendFrameIntoClientArea");
+    if (!DwmEnableBlurBehindWindow || !DwmExtendFrameIntoClientArea)
+    {
+        /* @Incomplete - logging */
+        return;
+    }
+
+
+    DWM_BLURBEHIND blur;
+    ZeroMemory(&blur, sizeof(DWM_BLURBEHIND));
+    blur.dwFlags = LK_DWM_BB_ENABLE;
+    blur.fEnable = TRUE;
+    DwmEnableBlurBehindWindow(window, &blur);
+
+    MARGINS margins;
+    ZeroMemory(&margins, sizeof(MARGINS));
+    margins.cxLeftWidth = -1;
+    DwmExtendFrameIntoClientArea(window, &margins);
+}
+
 
 static void lk_set_window_icon(HWND window, HDC dc)
 {
@@ -1611,21 +1662,27 @@ static int lk_create_modern_opengl_context(HINSTANCE instance)
     WGLMakeCurrent*    wglMakeCurrent    = lk_private.opengl.wglMakeCurrent;
     WGLGetProcAddress* wglGetProcAddress = lk_private.opengl.wglGetProcAddress;
 
-    HWND fake_window = CreateWindowExW(0, LK_WINDOW_CLASS_NAME, L"fake window", 0, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, 0, 0, instance, 0);
+    HWND fake_window;
+    HDC fake_dc;
+    PIXELFORMATDESCRIPTOR fake_pixel_format_desc;
+    int fake_pixel_format;
+    HGLRC fake_context;
+    HGLRC real_context;
+
+    fake_window = CreateWindowExW(0, LK_WINDOW_CLASS_NAME, L"fake window", 0, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, 0, 0, instance, 0);
     if (!fake_window)
     {
         /* @Incomplete - logging */
         return 0;
     }
 
-    HDC fake_dc = GetDC(fake_window);
+    fake_dc = GetDC(fake_window);
     if (!fake_dc)
     {
         /* @Incomplete - logging */
         goto undo_fake_window;
     }
 
-    PIXELFORMATDESCRIPTOR fake_pixel_format_desc;
     ZeroMemory(&fake_pixel_format_desc, sizeof(PIXELFORMATDESCRIPTOR));
     fake_pixel_format_desc.nSize = sizeof(PIXELFORMATDESCRIPTOR);
     fake_pixel_format_desc.nVersion = 1;
@@ -1635,7 +1692,7 @@ static int lk_create_modern_opengl_context(HINSTANCE instance)
     fake_pixel_format_desc.cDepthBits = 16;
     fake_pixel_format_desc.iLayerType = PFD_MAIN_PLANE;
 
-    int fake_pixel_format = ChoosePixelFormat(fake_dc, &fake_pixel_format_desc);
+    fake_pixel_format = ChoosePixelFormat(fake_dc, &fake_pixel_format_desc);
     if (fake_pixel_format == 0)
     {
         /* @Incomplete - logging */
@@ -1648,7 +1705,7 @@ static int lk_create_modern_opengl_context(HINSTANCE instance)
         goto undo_fake_dc;
     }
 
-    HGLRC fake_context = wglCreateContext(fake_dc);
+    fake_context = wglCreateContext(fake_dc);
 
     if (!fake_context)
     {
@@ -1679,46 +1736,58 @@ static int lk_create_modern_opengl_context(HINSTANCE instance)
     #undef LK_GetWGLFunction
 
 
-    HGLRC real_context;
     if (lk_private.opengl.wglChoosePixelFormatARB && lk_private.opengl.wglCreateContextAttribsARB)
     {
         HWND window = lk_private.window.handle;
         HDC dc = lk_private.window.dc;
 
         const int WGL_DRAW_TO_WINDOW_ARB    = 0x2001;
+        const int WGL_ACCELERATION_ARB      = 0x2003;
+        const int WGL_TRANSPARENT_ARB       = 0x200A;
         const int WGL_SUPPORT_OPENGL_ARB    = 0x2010;
         const int WGL_DOUBLE_BUFFER_ARB     = 0x2011;
-        const int WGL_ACCELERATION_ARB      = 0x2003;
         const int WGL_PIXEL_TYPE_ARB        = 0x2013;
         const int WGL_COLOR_BITS_ARB        = 0x2014;
+        const int WGL_ALPHA_BITS_ARB        = 0x201B;
         const int WGL_DEPTH_BITS_ARB        = 0x2022;
         const int WGL_STENCIL_BITS_ARB      = 0x2023;
+        const int WGL_FULL_ACCELERATION_ARB = 0x2027;
+        const int WGL_TYPE_RGBA_ARB         = 0x202B;
         const int WGL_SAMPLE_BUFFERS_ARB    = 0x2041;
         const int WGL_SAMPLES_ARB           = 0x2042;
 
-        const int WGL_FULL_ACCELERATION_ARB = 0x2027;
-        const int WGL_TYPE_RGBA_ARB         = 0x202B;
 
-        int pixel_format_attributes[] =
-        {
-            WGL_DRAW_TO_WINDOW_ARB, 1,
-            WGL_SUPPORT_OPENGL_ARB, 1,
-            WGL_DOUBLE_BUFFER_ARB, 1,
-            WGL_PIXEL_TYPE_ARB, WGL_TYPE_RGBA_ARB,
-            WGL_ACCELERATION_ARB, WGL_FULL_ACCELERATION_ARB,
-            WGL_COLOR_BITS_ARB, (int) lk_platform.opengl.color_bits,
-            WGL_DEPTH_BITS_ARB, (int) lk_platform.opengl.depth_bits,
-            WGL_STENCIL_BITS_ARB, (int) lk_platform.opengl.stencil_bits,
-            WGL_SAMPLE_BUFFERS_ARB, 1,
-            WGL_SAMPLES_ARB, (int) lk_platform.opengl.sample_count,
-            0
-        };
+        int pixel_format_attributes[32];
+        int pixel_format_attribute_count = 0;
 
-        if (lk_platform.opengl.sample_count <= 1)
+        #define LK_AddPixelFormatAttributes(attribute, value)                    \
+            pixel_format_attributes[pixel_format_attribute_count++] = attribute; \
+            pixel_format_attributes[pixel_format_attribute_count++] = value;     \
+            pixel_format_attributes[pixel_format_attribute_count] = 0;
+
+        LK_AddPixelFormatAttributes(WGL_DRAW_TO_WINDOW_ARB, 1);
+        LK_AddPixelFormatAttributes(WGL_SUPPORT_OPENGL_ARB, 1);
+        LK_AddPixelFormatAttributes(WGL_DOUBLE_BUFFER_ARB, 1);
+        LK_AddPixelFormatAttributes(WGL_PIXEL_TYPE_ARB, WGL_TYPE_RGBA_ARB);
+        LK_AddPixelFormatAttributes(WGL_ACCELERATION_ARB, WGL_FULL_ACCELERATION_ARB);
+        LK_AddPixelFormatAttributes(WGL_COLOR_BITS_ARB, (int) lk_platform.opengl.color_bits);
+        LK_AddPixelFormatAttributes(WGL_DEPTH_BITS_ARB, (int) lk_platform.opengl.depth_bits);
+        LK_AddPixelFormatAttributes(WGL_STENCIL_BITS_ARB, (int) lk_platform.opengl.stencil_bits);
+
+        if (lk_platform.window.transparent)
         {
-            // Don't set sample buffers and samples if the user didn't request multisampling.
-            pixel_format_attributes[16] = 0;
+            LK_AddPixelFormatAttributes(WGL_TRANSPARENT_ARB, TRUE);
+            LK_AddPixelFormatAttributes(WGL_ALPHA_BITS_ARB, 8);
         }
+
+        if (lk_platform.opengl.sample_count > 1)
+        {
+            LK_AddPixelFormatAttributes(WGL_SAMPLE_BUFFERS_ARB, 1);
+            LK_AddPixelFormatAttributes(WGL_SAMPLES_ARB, (int) lk_platform.opengl.sample_count);
+        }
+
+        #undef LK_AddPixelFormatAttributes
+
 
         int pixel_format;
         UINT pixel_format_count;
@@ -1727,7 +1796,7 @@ static int lk_create_modern_opengl_context(HINSTANCE instance)
             /* @Incomplete - logging */
             goto undo_fake_context;
         }
-         
+
         if (pixel_format_count == 0)
         {
             /* @Incomplete - logging */
@@ -1862,9 +1931,21 @@ static void lk_open_window()
         return;
     }
 
-    if (lk_platform.window.disable_animations)
+
+    HMODULE dwmapi = LoadLibraryA("dwmapi.dll");
+    if (dwmapi)
     {
-        lk_disable_window_animations(window_handle);
+        if (lk_platform.window.disable_animations)
+        {
+            lk_disable_window_animations(dwmapi, window_handle);
+        }
+
+        if (lk_platform.window.transparent)
+        {
+            lk_enable_window_transparency(dwmapi, window_handle);
+        }
+
+        FreeLibrary(dwmapi);
     }
 
 
@@ -2783,22 +2864,22 @@ THE UNLICENCE (http://unlicense.org)
 
     This is free and unencumbered software released into the public domain.
 
-    Anyone is free to copy, modify, publish, use, compile, sell, or distribute this 
-    software, either in source code form or as a compiled binary, for any purpose, 
+    Anyone is free to copy, modify, publish, use, compile, sell, or distribute this
+    software, either in source code form or as a compiled binary, for any purpose,
     commercial or non-commercial, and by any means.
 
-    In jurisdictions that recognize copyright laws, the author or authors of this 
-    software dedicate any and all copyright interest in the software to the public 
-    domain. We make this dedication for the benefit of the public at large and to 
-    the detriment of our heirs and successors. We intend this dedication to be an 
-    overt act of relinquishment in perpetuity of all present and future rights to 
+    In jurisdictions that recognize copyright laws, the author or authors of this
+    software dedicate any and all copyright interest in the software to the public
+    domain. We make this dedication for the benefit of the public at large and to
+    the detriment of our heirs and successors. We intend this dedication to be an
+    overt act of relinquishment in perpetuity of all present and future rights to
     this software under copyright law.
 
-    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR 
-    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, 
-    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE 
-    AUTHORS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN 
-    ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION 
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+    AUTHORS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
+    ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
     WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
  *********************************************************************************************/
