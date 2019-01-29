@@ -233,6 +233,82 @@ typedef enum
 
 enum
 {
+    LK_MAX_GAMEPADS = 8,
+};
+
+enum
+{
+    // Xbox controller buttons
+    LK_GAMEPAD_XBOX_A = 0,
+    LK_GAMEPAD_XBOX_B,
+    LK_GAMEPAD_XBOX_X,
+    LK_GAMEPAD_XBOX_Y,
+    LK_GAMEPAD_XBOX_LB,
+    LK_GAMEPAD_XBOX_RB,
+    LK_GAMEPAD_XBOX_VIEW,
+    LK_GAMEPAD_XBOX_MENU,
+    LK_GAMEPAD_XBOX_LSB,
+    LK_GAMEPAD_XBOX_RSB,
+
+    // PlayStation controller buttons
+    LK_GAMEPAD_PS_X = 0,
+    LK_GAMEPAD_PS_CIRCLE,
+    LK_GAMEPAD_PS_SQUARE,
+    LK_GAMEPAD_PS_TRIANGLE,
+    LK_GAMEPAD_PS_L1,
+    LK_GAMEPAD_PS_R1,
+    LK_GAMEPAD_PS_SELECT,
+    LK_GAMEPAD_PS_START,
+    LK_GAMEPAD_PS_L3,
+    LK_GAMEPAD_PS_R3,
+
+    LK_GAMEPAD_BUTTON_COUNT
+};
+
+enum
+{
+    // Xbox controller analogs
+    LK_GAMEPAD_XBOX_LEFT_STICK_X = 0,
+    LK_GAMEPAD_XBOX_LEFT_STICK_Y,
+    LK_GAMEPAD_XBOX_RIGHT_STICK_X,
+    LK_GAMEPAD_XBOX_RIGHT_STICK_Y,
+    LK_GAMEPAD_XBOX_TRIGGER,
+
+    // PlayStation controller analogs
+    LK_GAMEPAD_PS_LEFT_STICK_X = 0,
+    LK_GAMEPAD_PS_LEFT_STICK_Y,
+    LK_GAMEPAD_PS_RIGHT_STICK_X,
+    LK_GAMEPAD_PS_RIGHT_STICK_Y,
+    LK_GAMEPAD_PS_LR2,
+
+    LK_GAMEPAD_ANALOG_COUNT
+};
+
+struct LK_Analog_Stick
+{
+    LK_F64 x;
+    LK_F64 y;
+};
+
+struct LK_Gamepad
+{
+    LK_Digital_Button buttons[LK_GAMEPAD_BUTTON_COUNT];
+    LK_F64 analog[LK_GAMEPAD_ANALOG_COUNT];
+
+    struct
+    {
+        // Normalized vector in the direction of hat switch input. Zero if nothing is pressed.
+        LK_F64 x;
+        LK_F64 y;
+
+        // Negative value means nothing is pressed. Otherwise, it's the angle in degrees.
+        // Examples: 0 is right, 90 is up, 180 is left, 270 is down.
+        LK_F64 angle;
+    } hat;
+};
+
+enum
+{
     LK_DEFAULT_POSITION = 0x80000000,
 };
 
@@ -321,6 +397,8 @@ typedef struct LK_Platform_Structure
         LK_Digital_Button state[LK__KEY_COUNT];
         char* text; // UTF-8 formatted string.
     } keyboard;
+
+    LK_Gamepad gamepads[LK_MAX_GAMEPADS];
 
     struct
     {
@@ -438,6 +516,9 @@ extern "C"
 #include <windows.h> // @Incomplete - get rid of this include
 #include <dsound.h> // @Incomplete - get rid of this include
 #include <intrin.h> // @Incomplete - get rid of this include
+#include <hidclass.h> // @Incomplete - get rid of this include
+#include <hidsdi.h> // @Incomplete - get rid of this include
+#include <hidpi.h> // @Incomplete - get rid of this include
 
 
 typedef void LK_Client_Init_Function(LK_Platform* platform);
@@ -447,15 +528,6 @@ typedef void LK_Client_Audio_Function(LK_Platform* platform, LK_S16* samples);
 typedef void LK_Client_Log(LK_Platform* platform, const char* message, const char* file, int line);
 typedef void LK_Client_Dll_Load_Function(LK_Platform* platform);
 typedef void LK_Client_Dll_Unload_Function(LK_Platform* platform);
-
-typedef HGLRC WGLCreateContext(HDC hdc);
-typedef BOOL WGLDeleteContext(HGLRC hglrc);
-typedef BOOL WGLMakeCurrent(HDC hdc, HGLRC hglrc);
-typedef PROC WGLGetProcAddress(LPCSTR name);
-
-typedef BOOL WGLChoosePixelFormatARB(HDC hdc, const int *piAttribIList, const FLOAT *pfAttribFList, UINT nMaxFormats, int *piFormats, UINT *nNumFormats);
-typedef HGLRC WGLCreateContextAttribsARB(HDC hDC, HGLRC hShareContext, const int* attribList);
-typedef BOOL WGLSwapIntervalEXT(int interval);
 
 enum
 {
@@ -540,15 +612,15 @@ typedef struct
     {
         HMODULE library;
 
-        WGLCreateContext*  wglCreateContext;
-        WGLDeleteContext*  wglDeleteContext;
-        WGLMakeCurrent*    wglMakeCurrent;
-        WGLGetProcAddress* wglGetProcAddress;
+        HGLRC(*wglCreateContext )(HDC hdc);
+        BOOL (*wglDeleteContext )(HGLRC hglrc);
+        BOOL (*wglMakeCurrent   )(HDC hdc, HGLRC hglrc);
+        PROC (*wglGetProcAddress)(LPCSTR name);
 
         HGLRC context;
-        WGLChoosePixelFormatARB* wglChoosePixelFormatARB;
-        WGLCreateContextAttribsARB* wglCreateContextAttribsARB;
-        WGLSwapIntervalEXT* wglSwapIntervalEXT;
+        BOOL (*wglChoosePixelFormatARB   )(HDC hDC, const int* piAttribIList, const FLOAT* pfAttribFList, UINT nMaxFormats, int* piFormats, UINT* nNumFormats);
+        HGLRC(*wglCreateContextAttribsARB)(HDC hDC, HGLRC hShareContext, const int* attribList);
+        BOOL (*wglSwapIntervalEXT        )(int interval);
     } opengl;
 
     struct
@@ -578,6 +650,13 @@ static LK_Platform_Private lk_private;
 
 
 #define LK_Log(message)  lk_private.client.log(&lk_platform, message, __FILE__, __LINE__)
+
+#define LK_GetProc(module, destination, name)    \
+{                                                \
+    FARPROC proc = GetProcAddress(module, name); \
+    if (proc)                                    \
+        *(FARPROC*) &destination = proc;         \
+}
 
 
 static void lk_client_init_stub(LK_Platform* platform) {}
@@ -611,13 +690,7 @@ static void lk_load_client_functions_from_module(HMODULE module)
     {
         lk_private.client.load_failed = 0;
 
-        #define LK_GetClientFunction(name)                             \
-        {                                                              \
-            FARPROC proc = GetProcAddress(module, "lk_client_" #name); \
-            if (proc)                                                  \
-                *(FARPROC*) &lk_private.client.name = proc;            \
-        }
-
+        #define LK_GetClientFunction(name) LK_GetProc(module, lk_private.client.name, "lk_client_" #name)
         LK_GetClientFunction(init);
         LK_GetClientFunction(close);
         LK_GetClientFunction(frame);
@@ -625,7 +698,6 @@ static void lk_load_client_functions_from_module(HMODULE module)
         LK_GetClientFunction(log);
         LK_GetClientFunction(dll_load);
         LK_GetClientFunction(dll_unload);
-
         #undef LK_GetClientFunction
 
         lk_private.client.dll_load(&lk_platform);
@@ -1018,6 +1090,16 @@ static void lk_pull()
         lk_update_digital_button(button);
     }
 
+    for (int gamepad_index = 0; gamepad_index < LK_MAX_GAMEPADS; gamepad_index++)
+    {
+        LK_Gamepad* gamepad = &lk_platform.gamepads[gamepad_index];
+        for (int button_index = 0; button_index < LK_GAMEPAD_BUTTON_COUNT; button_index++)
+        {
+            LK_Digital_Button* button = &gamepad->buttons[button_index];
+            lk_update_digital_button(button);
+        }
+    }
+
     if (lk_private.window.backend == LK_WINDOW_CANVAS)
     {
         lk_update_canvas();
@@ -1261,6 +1343,166 @@ lk_window_callback(HWND window, UINT message, WPARAM wparam, LPARAM lparam)
             }
         }
 
+        if (input->header.dwType == RIM_TYPEHID)
+        {
+            HANDLE device = input->header.hDevice;
+
+            UINT preparsed_data_size;
+            if (GetRawInputDeviceInfo(device, RIDI_PREPARSEDDATA, NULL, &preparsed_data_size))
+            {
+                LK_Log("Failed to handle raw HID input; GetRawInputDeviceInfo() failed.");
+                goto run_default_proc;
+            }
+
+            PHIDP_PREPARSED_DATA preparsed_data = (PHIDP_PREPARSED_DATA) LocalAlloc(LMEM_FIXED, preparsed_data_size);
+
+            if (GetRawInputDeviceInfo(device, RIDI_PREPARSEDDATA, preparsed_data, &preparsed_data_size) <= 0)
+            {
+                LocalFree(preparsed_data);
+                LK_Log("Failed to handle raw HID input; GetRawInputDeviceInfo() failed.");
+                goto run_default_proc;
+            }
+
+            HIDP_CAPS capabilities;
+            if (HidP_GetCaps(preparsed_data, &capabilities) != HIDP_STATUS_SUCCESS)
+            {
+                LocalFree(preparsed_data);
+                LK_Log("Failed to get HID capabilities; HidP_GetCaps() failed.");
+                goto run_default_proc;
+            }
+
+            // printf("EVENT FROM DEVICE, USAGE %d\n", capabilities.Usage);
+
+            if (capabilities.Usage == 4 || // joystick input
+                capabilities.Usage == 5)   // gamepad input
+            {
+                LK_U32 gamepad_index = 0;  // @Incomplete - handle multiple gamepads
+                LK_Gamepad* gamepad = &lk_platform.gamepads[gamepad_index];
+
+                CHAR* raw_data = (CHAR*)(input->data.hid.bRawData);
+                ULONG raw_size = input->data.hid.dwSizeHid;
+
+                // Read button states.
+                {
+                    USHORT button_capability_count = capabilities.NumberInputButtonCaps;
+                    HIDP_BUTTON_CAPS* button_capability_array = (HIDP_BUTTON_CAPS*) LocalAlloc(LMEM_FIXED, sizeof(HIDP_BUTTON_CAPS) * button_capability_count);
+
+                    if (HidP_GetButtonCaps(HidP_Input, button_capability_array, &button_capability_count, preparsed_data) != HIDP_STATUS_SUCCESS)
+                    {
+                        LocalFree(preparsed_data);
+                        LocalFree(button_capability_array);
+                        LK_Log("Failed to get gamepad button capabilities; HidP_GetButtonCaps() failed.");
+                        goto run_default_proc;
+                    }
+
+                    if (button_capability_count)
+                    {
+                        HIDP_BUTTON_CAPS* button_capabilities = button_capability_array;
+                        USAGE number_of_buttons = button_capabilities->Range.UsageMax - button_capabilities->Range.UsageMin + 1;
+
+                        USAGE usage_page = button_capabilities->UsagePage;
+                        USAGE* usages = (USAGE*) LocalAlloc(LMEM_FIXED, sizeof(USAGE) * number_of_buttons);
+                        ULONG usage_count = number_of_buttons;
+
+                        if (HidP_GetUsages(HidP_Input, usage_page, 0, usages, &usage_count, preparsed_data, raw_data, raw_size) != HIDP_STATUS_SUCCESS)
+                        {
+                            LocalFree(usages);
+                            LocalFree(preparsed_data);
+                            LocalFree(button_capability_array);
+                            LK_Log("Failed to get gamepad button state; HidP_GetUsages() failed.");
+                            goto run_default_proc;
+                        }
+
+                        // printf("%d caps, %d buttons, %d pressed:", button_capability_count, number_of_buttons, usage_count);
+
+                        for (int i = 0; i < LK_GAMEPAD_BUTTON_COUNT; i++)
+                        {
+                            gamepad->buttons[i].down = 0;
+                        }
+
+                        for (int i = 0; i < usage_count; i++)
+                        {
+                            USAGE button_index = usages[i] - button_capabilities->Range.UsageMin;
+                            // printf(" %d", button_index);
+                            if (button_index >= 0 && button_index < LK_GAMEPAD_BUTTON_COUNT)
+                            {
+                                gamepad->buttons[button_index].down = 1;
+                            }
+                        }
+
+                        // printf("\n");
+
+                        LocalFree(usages);
+                    }
+
+                    LocalFree(button_capability_array);
+                }
+
+                // Read value states.
+                {
+                    USHORT value_capability_count = capabilities.NumberInputValueCaps;
+                    HIDP_VALUE_CAPS* value_capability_array = (HIDP_VALUE_CAPS*) LocalAlloc(LMEM_FIXED, sizeof(HIDP_VALUE_CAPS) * value_capability_count);
+
+                    if (HidP_GetValueCaps(HidP_Input, value_capability_array, &value_capability_count, preparsed_data) != HIDP_STATUS_SUCCESS)
+                    {
+                        LocalFree(preparsed_data);
+                        LocalFree(value_capability_array);
+                        LK_Log("Failed to get gamepad value capabilities; HidP_GetValueCaps() failed.");
+                        goto run_default_proc;
+                    }
+
+                    for (USHORT value_index = 0; value_index < value_capability_count; value_index++)
+                    {
+                        HIDP_VALUE_CAPS* value_capabilities = &value_capability_array[value_index];
+                        USAGE usage_page = value_capabilities->UsagePage;
+                        USAGE usage = value_capabilities->Range.UsageMin;
+
+                        ULONG value;
+                        if (HidP_GetUsageValue(HidP_Input, usage_page, 0, usage, &value, preparsed_data, raw_data, raw_size) != HIDP_STATUS_SUCCESS)
+                        {
+                            LocalFree(preparsed_data);
+                            LocalFree(value_capability_array);
+                            LK_Log("Failed to get gamepad usage value; HidP_GetUsageValue() failed.");
+                            goto run_default_proc;
+                        }
+
+                        USHORT bits = value_capabilities->BitSize;
+                        // printf("value #%d: usage %02x, value %d\n", value_index, usage, value);
+
+                        switch (usage)
+                        {
+                        case 0x30: gamepad->analog[0] =  ((LK_F64) value / (LK_F64)(1ul << (bits - 1)) - 1.0); break; // usage X,  left stick x
+                        case 0x31: gamepad->analog[1] = -((LK_F64) value / (LK_F64)(1ul << (bits - 1)) - 1.0); break; // usage Y,  left stick y
+                        case 0x33: gamepad->analog[2] =  ((LK_F64) value / (LK_F64)(1ul << (bits - 1)) - 1.0); break; // usage Rx, right stick x
+                        case 0x34: gamepad->analog[3] = -((LK_F64) value / (LK_F64)(1ul << (bits - 1)) - 1.0); break; // usage Ry, right stick y
+                        case 0x32: gamepad->analog[4] = -((LK_F64) value / (LK_F64)(1ul << (bits - 1)) - 1.0); break; // usage Z,  trigger left/right
+                        case 0x39: // usage hat switch
+                        {
+                            const double HSQRT2 = 0.70710678118;
+
+                            switch (value)
+                            {
+                            case 0: gamepad->hat.x =     0.0; gamepad->hat.y =     0.0; gamepad->hat.angle =  -1.0; break;
+                            case 1: gamepad->hat.x =     0.0; gamepad->hat.y =     1.0; gamepad->hat.angle =  90.0; break;
+                            case 2: gamepad->hat.x =  HSQRT2; gamepad->hat.y =  HSQRT2; gamepad->hat.angle =  45.0; break;
+                            case 3: gamepad->hat.x =     1.0; gamepad->hat.y =     0.0; gamepad->hat.angle =   0.0; break;
+                            case 4: gamepad->hat.x =  HSQRT2; gamepad->hat.y = -HSQRT2; gamepad->hat.angle = 315.0; break;
+                            case 5: gamepad->hat.x =     0.0; gamepad->hat.y =    -1.0; gamepad->hat.angle = 270.0; break;
+                            case 6: gamepad->hat.x = -HSQRT2; gamepad->hat.y = -HSQRT2; gamepad->hat.angle = 225.0; break;
+                            case 7: gamepad->hat.x =    -1.0; gamepad->hat.y =     0.0; gamepad->hat.angle = 180.0; break;
+                            case 8: gamepad->hat.x = -HSQRT2; gamepad->hat.y =  HSQRT2; gamepad->hat.angle = 135.0; break;
+                            }
+                        } break;
+                        }
+                    }
+
+                    LocalFree(value_capability_array);
+                }
+            }
+
+            LocalFree(preparsed_data);
+        }
+
         goto run_default_proc;
     } break;
 
@@ -1430,10 +1672,8 @@ static void lk_disable_window_animations(HMODULE dwmapi, HWND window)
 {
     const DWORD DWMWA_TRANSITIONS_FORCEDISABLED = 2;
 
-    typedef HRESULT LK_DwmSetWindowAttribute(HWND, DWORD, LPCVOID, DWORD);
-    LK_DwmSetWindowAttribute* DwmSetWindowAttribute;
-
-    DwmSetWindowAttribute = (LK_DwmSetWindowAttribute*) GetProcAddress(dwmapi, "DwmSetWindowAttribute");
+    HRESULT(*DwmSetWindowAttribute)(HWND, DWORD, LPCVOID, DWORD);
+    LK_GetProc(dwmapi, DwmSetWindowAttribute, "DwmSetWindowAttribute");
     if (DwmSetWindowAttribute)
     {
         BOOL disable = TRUE;
@@ -1462,15 +1702,11 @@ static void lk_enable_window_transparency(HMODULE dwmapi, HWND window)
         int cyBottomHeight;
     } MARGINS;
 
-    typedef HRESULT LK_DwmEnableBlurBehindWindow(HWND, DWM_BLURBEHIND*);
-    typedef HRESULT LK_DwmExtendFrameIntoClientArea(HWND, MARGINS*);
+    HRESULT(*DwmEnableBlurBehindWindow)(HWND, DWM_BLURBEHIND*);
+    HRESULT(*DwmExtendFrameIntoClientArea)(HWND, MARGINS*);
+    LK_GetProc(dwmapi, DwmEnableBlurBehindWindow, "DwmEnableBlurBehindWindow");
+    LK_GetProc(dwmapi, DwmExtendFrameIntoClientArea, "DwmExtendFrameIntoClientArea");
 
-
-    LK_DwmEnableBlurBehindWindow* DwmEnableBlurBehindWindow;
-    LK_DwmExtendFrameIntoClientArea* DwmExtendFrameIntoClientArea;
-
-    DwmEnableBlurBehindWindow = (LK_DwmEnableBlurBehindWindow*) GetProcAddress(dwmapi, "DwmEnableBlurBehindWindow");
-    DwmExtendFrameIntoClientArea = (LK_DwmExtendFrameIntoClientArea*) GetProcAddress(dwmapi, "DwmExtendFrameIntoClientArea");
     if (!DwmEnableBlurBehindWindow || !DwmExtendFrameIntoClientArea)
     {
         LK_Log("Failed to enable window transparency; missing DwmApi functions.");
@@ -1562,6 +1798,140 @@ static void lk_set_window_icon(HWND window, HDC dc)
     }
 }
 
+#if 0
+#define DIDFT_OPTIONAL      0x80000000
+
+static const LK_U8 LK_GUID_IDirectInput8A[16] = { 0x30,0x80,0x79,0xBF,0x3A,0x48,0xA2,0x4D,0xAA,0x99,0x5D,0x64,0xED,0x36,0x97,0x00 }; // BF798030-483A-4DA2-AA99-5D64ED369700
+static const LK_U8 LK_GUID_IDirectInput8W[16] = { 0x31,0x80,0x79,0xBF,0x3A,0x48,0xA2,0x4D,0xAA,0x99,0x5D,0x64,0xED,0x36,0x97,0x00 }; // BF798031-483A-4DA2-AA99-5D64ED369700
+static const LK_U8 LK_GUID_XAxis[16]          = { 0xE0,0x02,0x6D,0xA3,0xF3,0xC9,0xCF,0x11,0xBF,0xC7,0x44,0x45,0x53,0x54,0x00,0x00 };
+static const LK_U8 LK_GUID_YAxis[16]          = { 0xE1,0x02,0x6D,0xA3,0xF3,0xC9,0xCF,0x11,0xBF,0xC7,0x44,0x45,0x53,0x54,0x00,0x00 };
+static const LK_U8 LK_GUID_ZAxis[16]          = { 0xE2,0x02,0x6D,0xA3,0xF3,0xC9,0xCF,0x11,0xBF,0xC7,0x44,0x45,0x53,0x54,0x00,0x00 };
+static const LK_U8 LK_GUID_RxAxis[16]         = { 0xF4,0x02,0x6D,0xA3,0xF3,0xC9,0xCF,0x11,0xBF,0xC7,0x44,0x45,0x53,0x54,0x00,0x00 };
+static const LK_U8 LK_GUID_RyAxis[16]         = { 0xF5,0x02,0x6D,0xA3,0xF3,0xC9,0xCF,0x11,0xBF,0xC7,0x44,0x45,0x53,0x54,0x00,0x00 };
+static const LK_U8 LK_GUID_RzAxis[16]         = { 0xE3,0x02,0x6D,0xA3,0xF3,0xC9,0xCF,0x11,0xBF,0xC7,0x44,0x45,0x53,0x54,0x00,0x00 };
+static const LK_U8 LK_GUID_Slider[16]         = { 0xE4,0x02,0x6D,0xA3,0xF3,0xC9,0xCF,0x11,0xBF,0xC7,0x44,0x45,0x53,0x54,0x00,0x00 };
+static const LK_U8 LK_GUID_Button[16]         = { 0xF0,0x02,0x6D,0xA3,0xF3,0xC9,0xCF,0x11,0xBF,0xC7,0x44,0x45,0x53,0x54,0x00,0x00 };
+static const LK_U8 LK_GUID_Key[16]            = { 0x20,0x82,0x72,0x55,0x3C,0xD3,0xCF,0x11,0xBF,0xC7,0x44,0x45,0x53,0x54,0x00,0x00 };
+static const LK_U8 LK_GUID_POV[16]            = { 0xF2,0x02,0x6D,0xA3,0xF3,0xC9,0xCF,0x11,0xBF,0xC7,0x44,0x45,0x53,0x54,0x00,0x00 };
+
+static const DIOBJECTDATAFORMAT lk_joystick_data_format_array[] =
+{
+    { (GUID*) &LK_GUID_XAxis,  DIJOFS_X,         DIDFT_OPTIONAL | DIDFT_AXIS | DIDFT_ANYINSTANCE, 0},
+    { (GUID*) &LK_GUID_YAxis,  DIJOFS_Y,         DIDFT_OPTIONAL | DIDFT_AXIS | DIDFT_ANYINSTANCE, 0},
+    { (GUID*) &LK_GUID_ZAxis,  DIJOFS_Z,         DIDFT_OPTIONAL | DIDFT_AXIS | DIDFT_ANYINSTANCE, 0},
+    { (GUID*) &LK_GUID_RxAxis, DIJOFS_RX,        DIDFT_OPTIONAL | DIDFT_AXIS | DIDFT_ANYINSTANCE, 0},
+    { (GUID*) &LK_GUID_RyAxis, DIJOFS_RY,        DIDFT_OPTIONAL | DIDFT_AXIS | DIDFT_ANYINSTANCE, 0},
+    { (GUID*) &LK_GUID_RzAxis, DIJOFS_RZ,        DIDFT_OPTIONAL | DIDFT_AXIS | DIDFT_ANYINSTANCE, 0},
+    { (GUID*) &LK_GUID_Slider, DIJOFS_SLIDER(0), DIDFT_OPTIONAL | DIDFT_AXIS | DIDFT_ANYINSTANCE, 0},
+    { (GUID*) &LK_GUID_Slider, DIJOFS_SLIDER(1), DIDFT_OPTIONAL | DIDFT_AXIS | DIDFT_ANYINSTANCE, 0},
+    { (GUID*) &LK_GUID_POV,    DIJOFS_POV(0),    DIDFT_OPTIONAL | DIDFT_POV  | DIDFT_ANYINSTANCE, 0},
+    { (GUID*) &LK_GUID_POV,    DIJOFS_POV(1),    DIDFT_OPTIONAL | DIDFT_POV  | DIDFT_ANYINSTANCE, 0},
+    { (GUID*) &LK_GUID_POV,    DIJOFS_POV(2),    DIDFT_OPTIONAL | DIDFT_POV  | DIDFT_ANYINSTANCE, 0},
+    { (GUID*) &LK_GUID_POV,    DIJOFS_POV(3),    DIDFT_OPTIONAL | DIDFT_POV  | DIDFT_ANYINSTANCE, 0},
+    { NULL, DIJOFS_BUTTON(0),  DIDFT_OPTIONAL | DIDFT_BUTTON | DIDFT_ANYINSTANCE, 0},
+    { NULL, DIJOFS_BUTTON(1),  DIDFT_OPTIONAL | DIDFT_BUTTON | DIDFT_ANYINSTANCE, 0},
+    { NULL, DIJOFS_BUTTON(2),  DIDFT_OPTIONAL | DIDFT_BUTTON | DIDFT_ANYINSTANCE, 0},
+    { NULL, DIJOFS_BUTTON(3),  DIDFT_OPTIONAL | DIDFT_BUTTON | DIDFT_ANYINSTANCE, 0},
+    { NULL, DIJOFS_BUTTON(4),  DIDFT_OPTIONAL | DIDFT_BUTTON | DIDFT_ANYINSTANCE, 0},
+    { NULL, DIJOFS_BUTTON(5),  DIDFT_OPTIONAL | DIDFT_BUTTON | DIDFT_ANYINSTANCE, 0},
+    { NULL, DIJOFS_BUTTON(6),  DIDFT_OPTIONAL | DIDFT_BUTTON | DIDFT_ANYINSTANCE, 0},
+    { NULL, DIJOFS_BUTTON(7),  DIDFT_OPTIONAL | DIDFT_BUTTON | DIDFT_ANYINSTANCE, 0},
+    { NULL, DIJOFS_BUTTON(8),  DIDFT_OPTIONAL | DIDFT_BUTTON | DIDFT_ANYINSTANCE, 0},
+    { NULL, DIJOFS_BUTTON(9),  DIDFT_OPTIONAL | DIDFT_BUTTON | DIDFT_ANYINSTANCE, 0},
+    { NULL, DIJOFS_BUTTON(10), DIDFT_OPTIONAL | DIDFT_BUTTON | DIDFT_ANYINSTANCE, 0},
+    { NULL, DIJOFS_BUTTON(11), DIDFT_OPTIONAL | DIDFT_BUTTON | DIDFT_ANYINSTANCE, 0},
+    { NULL, DIJOFS_BUTTON(12), DIDFT_OPTIONAL | DIDFT_BUTTON | DIDFT_ANYINSTANCE, 0},
+    { NULL, DIJOFS_BUTTON(13), DIDFT_OPTIONAL | DIDFT_BUTTON | DIDFT_ANYINSTANCE, 0},
+    { NULL, DIJOFS_BUTTON(14), DIDFT_OPTIONAL | DIDFT_BUTTON | DIDFT_ANYINSTANCE, 0},
+    { NULL, DIJOFS_BUTTON(15), DIDFT_OPTIONAL | DIDFT_BUTTON | DIDFT_ANYINSTANCE, 0},
+    { NULL, DIJOFS_BUTTON(16), DIDFT_OPTIONAL | DIDFT_BUTTON | DIDFT_ANYINSTANCE, 0},
+    { NULL, DIJOFS_BUTTON(17), DIDFT_OPTIONAL | DIDFT_BUTTON | DIDFT_ANYINSTANCE, 0},
+    { NULL, DIJOFS_BUTTON(18), DIDFT_OPTIONAL | DIDFT_BUTTON | DIDFT_ANYINSTANCE, 0},
+    { NULL, DIJOFS_BUTTON(19), DIDFT_OPTIONAL | DIDFT_BUTTON | DIDFT_ANYINSTANCE, 0},
+    { NULL, DIJOFS_BUTTON(20), DIDFT_OPTIONAL | DIDFT_BUTTON | DIDFT_ANYINSTANCE, 0},
+    { NULL, DIJOFS_BUTTON(21), DIDFT_OPTIONAL | DIDFT_BUTTON | DIDFT_ANYINSTANCE, 0},
+    { NULL, DIJOFS_BUTTON(22), DIDFT_OPTIONAL | DIDFT_BUTTON | DIDFT_ANYINSTANCE, 0},
+    { NULL, DIJOFS_BUTTON(23), DIDFT_OPTIONAL | DIDFT_BUTTON | DIDFT_ANYINSTANCE, 0},
+    { NULL, DIJOFS_BUTTON(24), DIDFT_OPTIONAL | DIDFT_BUTTON | DIDFT_ANYINSTANCE, 0},
+    { NULL, DIJOFS_BUTTON(25), DIDFT_OPTIONAL | DIDFT_BUTTON | DIDFT_ANYINSTANCE, 0},
+    { NULL, DIJOFS_BUTTON(26), DIDFT_OPTIONAL | DIDFT_BUTTON | DIDFT_ANYINSTANCE, 0},
+    { NULL, DIJOFS_BUTTON(27), DIDFT_OPTIONAL | DIDFT_BUTTON | DIDFT_ANYINSTANCE, 0},
+    { NULL, DIJOFS_BUTTON(28), DIDFT_OPTIONAL | DIDFT_BUTTON | DIDFT_ANYINSTANCE, 0},
+    { NULL, DIJOFS_BUTTON(29), DIDFT_OPTIONAL | DIDFT_BUTTON | DIDFT_ANYINSTANCE, 0},
+    { NULL, DIJOFS_BUTTON(30), DIDFT_OPTIONAL | DIDFT_BUTTON | DIDFT_ANYINSTANCE, 0},
+    { NULL, DIJOFS_BUTTON(31), DIDFT_OPTIONAL | DIDFT_BUTTON | DIDFT_ANYINSTANCE, 0},
+};
+
+static const DIDATAFORMAT lk_joystick_data_format =
+{
+    sizeof(DIDATAFORMAT),
+    sizeof(DIOBJECTDATAFORMAT),
+    DIDF_ABSAXIS,
+    sizeof(DIJOYSTATE),
+    sizeof(lk_joystick_data_format_array) / sizeof(lk_joystick_data_format_array[0]),
+    (LPDIOBJECTDATAFORMAT) lk_joystick_data_format_array
+};
+
+static BOOL lk_directinput_enum_devices(LPCDIDEVICEINSTANCEA device, LPVOID userdata)
+{
+    IDirectInput8A* direct_input = lk_private.directinput.direct_input;
+
+    LPDIRECTINPUTDEVICE8 controller;
+    HRESULT create_success = direct_input->CreateDevice(device->guidInstance, &controller, NULL);
+    if (FAILED(create_success))
+        return DIENUM_CONTINUE;
+
+    HWND window = lk_private.window.handle;
+    HRESULT cooperate_success = controller->SetCooperativeLevel(window, DISCL_FOREGROUND | DISCL_NONEXCLUSIVE);
+    if (FAILED(cooperate_success))
+    {
+        LK_Log("Failed to set cooperative level for controller device.");
+    }
+
+    if (FAILED(controller->SetDataFormat(&lk_joystick_data_format)))
+    {
+        LK_Log("Failed to set the data format for controller device.");
+    }
+
+    // printf("found %s!\n", device->tszInstanceName);
+    return DIENUM_CONTINUE;
+}
+
+static int lk_load_directinput_library()
+{
+    HMODULE library = LoadLibraryA("dinput8.dll");
+    if (library == 0)
+    {
+        LK_Log("Failed to load DirectInput; couldn't load dinput8.dll.");
+        return 0;
+    }
+
+
+    HINSTANCE instance = GetModuleHandle(NULL);
+    HRESULT(*DirectInput8Create)(HINSTANCE hinst, DWORD dwVersion, IID* riidltf, LPVOID* ppvOut, LPUNKNOWN punkOuter);
+    LK_GetProc(library, DirectInput8Create, "DirectInput8Create");
+    if (!DirectInput8Create)
+    {
+        LK_Log("Failed to load DirectInput; couldn't find DirectInput8Create in dinput8.dll.");
+        return 0;
+    }
+
+    IDirectInput8A* direct_input;
+    if (FAILED(DirectInput8Create(instance, DIRECTINPUT_VERSION, (IID*) &LK_GUID_IDirectInput8A, (void**) &direct_input, NULL)))
+    {
+        LK_Log("Failed to load DirectInput; couldn't to create an IDirectInput8 instance.");
+        return 0;
+    }
+
+    lk_private.directinput.direct_input = direct_input;
+    direct_input->EnumDevices(DI8DEVCLASS_GAMECTRL, lk_directinput_enum_devices, NULL, DIEDFL_ATTACHEDONLY);
+
+    // printf("loaded!\n");
+
+    return 1;
+}
+#endif
+
 static int lk_load_opengl_library()
 {
     HMODULE library = LoadLibraryA("opengl32.dll");
@@ -1573,17 +1943,16 @@ static int lk_load_opengl_library()
 
     lk_private.opengl.library = library;
 
-    #define LK_GetOpenGLFunction(name)                   \
-    {                                                    \
-        FARPROC proc = GetProcAddress(library, #name);   \
-        if (!proc)                                       \
-        {                                                \
-            LK_Log("Failed to create an OpenGL context;" \
-                  " couldn't find " #name "() in"        \
-                  " OpenGL32.dll.");                     \
-            return 0;                                    \
-        }                                                \
-        *(FARPROC*) &lk_private.opengl.name = proc;      \
+    #define LK_GetOpenGLFunction(name)                      \
+    {                                                       \
+        LK_GetProc(library, lk_private.opengl.name, #name); \
+        if (!lk_private.opengl.name)                        \
+        {                                                   \
+            LK_Log("Failed to create an OpenGL context;"    \
+                  " couldn't find " #name "() in"           \
+                  " OpenGL32.dll.");                        \
+            return 0;                                       \
+        }                                                   \
     }
 
     LK_GetOpenGLFunction(wglCreateContext );
@@ -1598,10 +1967,6 @@ static int lk_load_opengl_library()
 
 static void lk_create_legacy_opengl_context(HINSTANCE instance)
 {
-    WGLCreateContext* wglCreateContext = lk_private.opengl.wglCreateContext;
-    WGLDeleteContext* wglDeleteContext = lk_private.opengl.wglDeleteContext;
-    WGLMakeCurrent*   wglMakeCurrent   = lk_private.opengl.wglMakeCurrent;
-
     HWND window = lk_private.window.handle;
     HDC dc = lk_private.window.dc;
 
@@ -1629,7 +1994,7 @@ static void lk_create_legacy_opengl_context(HINSTANCE instance)
         return;
     }
 
-    HGLRC context = wglCreateContext(dc);
+    HGLRC context = lk_private.opengl.wglCreateContext(dc);
 
     if (!context)
     {
@@ -1637,10 +2002,10 @@ static void lk_create_legacy_opengl_context(HINSTANCE instance)
         return;
     }
 
-    if (!wglMakeCurrent(dc, context))
+    if (!lk_private.opengl.wglMakeCurrent(dc, context))
     {
         LK_Log("Failed to create a legacy OpenGL context; wglMakeCurrent() failed.");
-        wglDeleteContext(context);
+        lk_private.opengl.wglDeleteContext(context);
         return;
     }
 
@@ -1649,11 +2014,6 @@ static void lk_create_legacy_opengl_context(HINSTANCE instance)
 
 static int lk_create_modern_opengl_context(HINSTANCE instance)
 {
-    WGLCreateContext*  wglCreateContext  = lk_private.opengl.wglCreateContext;
-    WGLDeleteContext*  wglDeleteContext  = lk_private.opengl.wglDeleteContext;
-    WGLMakeCurrent*    wglMakeCurrent    = lk_private.opengl.wglMakeCurrent;
-    WGLGetProcAddress* wglGetProcAddress = lk_private.opengl.wglGetProcAddress;
-
     HWND fake_window;
     HDC fake_dc;
     PIXELFORMATDESCRIPTOR fake_pixel_format_desc;
@@ -1697,7 +2057,7 @@ static int lk_create_modern_opengl_context(HINSTANCE instance)
         goto undo_fake_dc;
     }
 
-    fake_context = wglCreateContext(fake_dc);
+    fake_context = lk_private.opengl.wglCreateContext(fake_dc);
 
     if (!fake_context)
     {
@@ -1705,25 +2065,25 @@ static int lk_create_modern_opengl_context(HINSTANCE instance)
         goto undo_fake_dc;
     }
 
-    if (!wglMakeCurrent(fake_dc, fake_context))
+    if (!lk_private.opengl.wglMakeCurrent(fake_dc, fake_context))
     {
         LK_Log("Failed to create a modern OpenGL context; wglMakeCurrent() failed.");
         goto undo_fake_context;
     }
 
 
-    #define LK_GetWGLFunction(type, name)                                                                       \
-    {                                                                                                           \
-        void* proc = wglGetProcAddress(#name);                                                                  \
-        if (proc && (proc != (void*) 1) && (proc != (void*) 2) && (proc != (void*) 3) && (proc != (void*) -1))  \
-            lk_private.opengl.name = (type*) proc;                                                              \
-        else                                                                                                    \
-            lk_private.opengl.name = 0;                                                                         \
+    #define LK_GetWGLFunction(name)                                                                        \
+    {                                                                                                      \
+        PROC proc = lk_private.opengl.wglGetProcAddress(#name);                                            \
+        if (proc && (proc != (PROC) 1) && (proc != (PROC) 2) && (proc != (PROC) 3) && (proc != (PROC) -1)) \
+            *(PROC*) &lk_private.opengl.name = proc;                                                       \
+        else                                                                                               \
+            lk_private.opengl.name = 0;                                                                    \
     }
 
-    LK_GetWGLFunction(WGLChoosePixelFormatARB, wglChoosePixelFormatARB)
-    LK_GetWGLFunction(WGLCreateContextAttribsARB, wglCreateContextAttribsARB)
-    LK_GetWGLFunction(WGLSwapIntervalEXT, wglSwapIntervalEXT)
+    LK_GetWGLFunction(wglChoosePixelFormatARB)
+    LK_GetWGLFunction(wglCreateContextAttribsARB)
+    LK_GetWGLFunction(wglSwapIntervalEXT)
 
     #undef LK_GetWGLFunction
 
@@ -1860,12 +2220,12 @@ static int lk_create_modern_opengl_context(HINSTANCE instance)
             goto undo_fake_context;
         }
 
-        wglMakeCurrent(0, 0);
-        wglDeleteContext(fake_context);
+        lk_private.opengl.wglMakeCurrent(0, 0);
+        lk_private.opengl.wglDeleteContext(fake_context);
         ReleaseDC(fake_window, fake_dc);
         DestroyWindow(fake_window);
 
-        if (!wglMakeCurrent(dc, real_context))
+        if (!lk_private.opengl.wglMakeCurrent(dc, real_context))
         {
             LK_Log("Failed to create a modern OpenGL context; wglMakeCurrent() failed.");
             goto undo_real_context;
@@ -1881,10 +2241,10 @@ static int lk_create_modern_opengl_context(HINSTANCE instance)
 
 
 undo_real_context:
-    wglDeleteContext(real_context);
+    lk_private.opengl.wglDeleteContext(real_context);
 undo_fake_context:
-    wglMakeCurrent(0, 0);
-    wglDeleteContext(fake_context);
+    lk_private.opengl.wglMakeCurrent(0, 0);
+    lk_private.opengl.wglDeleteContext(fake_context);
 undo_fake_dc:
     ReleaseDC(fake_window, fake_dc);
 undo_fake_window:
@@ -2008,10 +2368,38 @@ static void lk_open_window()
         }
     }
 
+#if 0
+    lk_load_directinput_library();
+#endif
+
     lk_pull();
     lk_update_canvas();
     lk_update_swap_interval();
 
+#if 0
+    UINT count_raw_devices = 0;
+    GetRawInputDeviceList(NULL, &count_raw_devices, sizeof(RAWINPUTDEVICELIST));
+    printf("Detected %d raw input devices:\n", count_raw_devices);
+    RAWINPUTDEVICELIST* devices = (RAWINPUTDEVICELIST*) malloc(sizeof(RAWINPUTDEVICELIST) * count_raw_devices);
+    GetRawInputDeviceList(devices, &count_raw_devices, sizeof(RAWINPUTDEVICELIST));
+    for (int i = 0; i < count_raw_devices; i++)
+    {
+        HANDLE device = devices[i].hDevice;
+        RID_DEVICE_INFO device_info;
+        device_info.cbSize = sizeof(RID_DEVICE_INFO);
+        UINT size = sizeof(RID_DEVICE_INFO);
+        GetRawInputDeviceInfoA(device, RIDI_DEVICEINFO, &device_info, &size);
+
+        const char* type[] = { "mouse", "keyboard", "other" };
+        printf("  %s", type[device_info.dwType]);
+        if (device_info.dwType == 2)
+        {
+            printf(" - usage %d, page %d", device_info.hid.usUsage, device_info.hid.usUsagePage);
+        }
+        printf("\n");
+    }
+    free(devices);
+#endif
 
     RAWINPUTDEVICE raw_input_mouse;
     ZeroMemory(&raw_input_mouse, sizeof(raw_input_mouse));
@@ -2031,7 +2419,29 @@ static void lk_open_window()
     raw_input_keyboard.hwndTarget = window_handle;
     if (!RegisterRawInputDevices(&raw_input_keyboard, 1, sizeof(raw_input_keyboard)))
     {
-        LK_Log("Failed to register the keybaord input device; the window won't receive keyboard events.");
+        LK_Log("Failed to register the keyboard input device; the window won't receive keyboard events.");
+        return;
+    }
+
+    RAWINPUTDEVICE raw_input_joystick;
+    ZeroMemory(&raw_input_joystick, sizeof(raw_input_joystick));
+    raw_input_joystick.usUsagePage = 0x01;
+    raw_input_joystick.usUsage = 0x04;
+    raw_input_joystick.hwndTarget = window_handle;
+    if (!RegisterRawInputDevices(&raw_input_joystick, 1, sizeof(raw_input_joystick)))
+    {
+        LK_Log("Failed to register the joystick input device; the window won't receive joystick events.");
+        return;
+    }
+
+    RAWINPUTDEVICE raw_input_gamepad;
+    ZeroMemory(&raw_input_gamepad, sizeof(raw_input_gamepad));
+    raw_input_gamepad.usUsagePage = 0x01;
+    raw_input_gamepad.usUsage = 0x05;
+    raw_input_gamepad.hwndTarget = window_handle;
+    if (!RegisterRawInputDevices(&raw_input_gamepad, 1, sizeof(raw_input_gamepad)))
+    {
+        LK_Log("Failed to register the gamepad input device; the window won't receive gamepad events.");
         return;
     }
 }
@@ -2385,11 +2795,9 @@ static void lk_initialize_audio()
         return;
     }
 
-    typedef HRESULT WINAPI LK_DirectSoundCreate(LPGUID, LPDIRECTSOUND*, LPUNKNOWN);
-    LK_DirectSoundCreate* direct_sound_create;
-
-    direct_sound_create = (LK_DirectSoundCreate*) GetProcAddress(dsound, "DirectSoundCreate");
-    if (!direct_sound_create)
+    HRESULT(WINAPI *DirectSoundCreate)(LPGUID, LPDIRECTSOUND*, LPUNKNOWN);
+    LK_GetProc(dsound, DirectSoundCreate, "DirectSoundCreate");
+    if (!DirectSoundCreate)
     {
         LK_Log("Failed to initialize audio; couldn't find DirectSoundCreate() in dsound.dll.");
         lk_platform.audio.strategy = LK_NO_AUDIO;
@@ -2397,7 +2805,7 @@ static void lk_initialize_audio()
     }
 
     LPDIRECTSOUND direct_sound;
-    if (!SUCCEEDED(direct_sound_create(0, &direct_sound, 0)))
+    if (!SUCCEEDED(DirectSoundCreate(0, &direct_sound, 0)))
     {
         LK_Log("Failed to initialize audio; DirectSoundCreate() failed.");
         lk_platform.audio.strategy = LK_NO_AUDIO;
