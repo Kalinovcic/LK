@@ -49,6 +49,10 @@ If you want lk_platform to use your logging API, you should expose:
 
     LK_CLIENT_EXPORT void lk_client_log(LK_Platform* platform, const char* message, const char* file, int line);
 
+Additional OS-specific callbacks:
+
+    LK_CLIENT_EXPORT BOOL lk_client_win32_event_handler(LK_Platform* platform, HWND window, UINT message, WPARAM wparam, LPARAM lparam, LRESULT* out_return);
+
 The platform pointer that's passed in all of the functions is unique and never changes during the lifetime of the application.
 If you're using dynamic DLL loading, all of your global variables WILL BE DESTROYED after the DLL gets unloaded.
 You can keep a pointer to persistent storage in platform->client_data.
@@ -528,6 +532,7 @@ typedef void LK_Client_Audio_Function(LK_Platform* platform, LK_S16* samples);
 typedef void LK_Client_Log(LK_Platform* platform, const char* message, const char* file, int line);
 typedef void LK_Client_Dll_Load_Function(LK_Platform* platform);
 typedef void LK_Client_Dll_Unload_Function(LK_Platform* platform);
+typedef BOOL LK_Client_Win32_Event_Handler(LK_Platform* platform, HWND window, UINT message, WPARAM wparam, LPARAM lparam, LRESULT* out_return);
 
 enum
 {
@@ -569,6 +574,7 @@ typedef struct
         LK_Client_Log* log;
         LK_Client_Dll_Load_Function* dll_load;
         LK_Client_Dll_Unload_Function* dll_unload;
+        LK_Client_Win32_Event_Handler* win32_event_handler;
 
         LK_B32 load_failed;
     } client;
@@ -664,6 +670,7 @@ static void lk_client_frame_stub(LK_Platform* platform) {}
 static void lk_client_close_stub(LK_Platform* platform) {}
 static void lk_client_dll_load_stub(LK_Platform* platform) {}
 static void lk_client_dll_unload_stub(LK_Platform* platform) {}
+static BOOL lk_client_win32_event_handler_stub(LK_Platform* platform, HWND window, UINT message, WPARAM wparam, LPARAM lparam, LRESULT* out_return) { return 0; }
 
 static void lk_client_audio_stub(LK_Platform* platform, LK_S16* samples)
 {
@@ -677,13 +684,14 @@ static void lk_client_log_stub(LK_Platform* platform, const char* message, const
 
 static void lk_load_client_functions_from_module(HMODULE module)
 {
-    lk_private.client.init       = lk_client_init_stub;
-    lk_private.client.close      = lk_client_close_stub;
-    lk_private.client.frame      = lk_client_frame_stub;
-    lk_private.client.audio      = lk_client_audio_stub;
-    lk_private.client.log        = lk_client_log_stub;
-    lk_private.client.dll_load   = lk_client_dll_load_stub;
-    lk_private.client.dll_unload = lk_client_dll_unload_stub;
+    lk_private.client.init                = lk_client_init_stub;
+    lk_private.client.close               = lk_client_close_stub;
+    lk_private.client.frame               = lk_client_frame_stub;
+    lk_private.client.audio               = lk_client_audio_stub;
+    lk_private.client.log                 = lk_client_log_stub;
+    lk_private.client.dll_load            = lk_client_dll_load_stub;
+    lk_private.client.dll_unload          = lk_client_dll_unload_stub;
+    lk_private.client.win32_event_handler = lk_client_win32_event_handler_stub;
 
     lk_private.client.library = module;
     if (module)
@@ -698,6 +706,7 @@ static void lk_load_client_functions_from_module(HMODULE module)
         LK_GetClientFunction(log);
         LK_GetClientFunction(dll_load);
         LK_GetClientFunction(dll_unload);
+        LK_GetClientFunction(win32_event_handler);
         #undef LK_GetClientFunction
 
         lk_private.client.dll_load(&lk_platform);
@@ -845,6 +854,7 @@ static void lk_unload_client()
         lk_private.client.audio = 0;
         lk_private.client.dll_load = 0;
         lk_private.client.dll_unload = 0;
+        lk_private.client.win32_event_handler = 0;
     }
 
     lk_delete_temp_dll();
@@ -1143,6 +1153,12 @@ static void lk_repaint_canvas_rectangle(HDC device_context, int x, int y, int wi
 static LRESULT CALLBACK
 lk_window_callback(HWND window, UINT message, WPARAM wparam, LPARAM lparam)
 {
+    LPARAM user_return;
+    if (lk_private.client.win32_event_handler(&lk_platform, window, message, wparam, lparam, &user_return))
+    {
+        return user_return;
+    }
+
     if (window != lk_private.window.handle)
     {
         return DefWindowProcW(window, message, wparam, lparam);
