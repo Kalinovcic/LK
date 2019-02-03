@@ -1,11 +1,11 @@
-//  lk_platform.h - public domain platform abstraction layer with live code editing support
+//  lk_platform->h - public domain platform abstraction layer with live code editing support
 //  no warranty is offered or implied
 
 /*********************************************************************************************
 
 Include this file in all places you need to refer to it. In one of your compilation units, write:
     #define LK_PLATFORM_IMPLEMENTATION
-before including lk_platform.h, in order to paste in the source code.
+before including lk_platform->h, in order to paste in the source code.
 
 This library provides a platform layer with support for live code editing. That enables you to
 modify your source code, recompile it, and see the changes happen live (on the next frame),
@@ -15,11 +15,11 @@ layer will then load the DLL dynamically at runtime, and reload it if it detects
 
 If you want live code editing, you must specify the DLL name (not including the extension) by defining:
     #define LK_PLATFORM_DLL_NAME "my_application_dll"
-before including the implementation of lk_platform.h.
+before including the implementation of lk_platform->h.
 
 If you don't want live code editing, you must disable it by defining:
     #define LK_PLATFORM_NO_DLL
-before including the implementation of lk_platform.h.
+before including the implementation of lk_platform->h.
 
 As for the platform layer itself, it's designed to minimize interaction between the application
 and the platform. All communication goes through a single LK_Platform context struct, and the only
@@ -485,10 +485,36 @@ typedef struct LK_Platform_Structure
         LK_U64 ram_megabytes;
     } system;
 
+    void* private_pointer;
+
 #ifdef LK_PLATFORM_USER_CONTEXT
     LK_PLATFORM_USER_CONTEXT
 #endif
 } LK_Platform;
+
+
+typedef void LK_Client_Init_Function(LK_Platform* platform);
+typedef void LK_Client_Close_Function(LK_Platform* platform);
+typedef void LK_Client_Frame_Function(LK_Platform* platform);
+typedef void LK_Client_Audio_Function(LK_Platform* platform, LK_S16* samples);
+typedef void LK_Client_Log_Function(LK_Platform* platform, const char* message, const char* file, int line);
+typedef void LK_Client_Dll_Load_Function(LK_Platform* platform);
+typedef void LK_Client_Dll_Unload_Function(LK_Platform* platform);
+
+
+typedef struct
+{
+    LK_Client_Init_Function*       init;
+    LK_Client_Close_Function*      close;
+    LK_Client_Frame_Function*      frame;
+    LK_Client_Audio_Function*      audio;
+    LK_Client_Log_Function*        log;
+    LK_Client_Dll_Load_Function*   dll_load;
+    LK_Client_Dll_Unload_Function* dll_unload;
+} LK_Client_Functions;
+
+void lk_entry(LK_Client_Functions* functions);
+
 
 #ifdef __cplusplus
 }
@@ -507,31 +533,22 @@ extern "C"
 {
 #endif
 
-#ifndef LK_WINDOW_CLASS_NAME
-#define LK_WINDOW_CLASS_NAME L"lk_platform_window_class"
-#endif
-
 #if !defined(_WIN32_WINNT) && !defined(WINVER)
 // Targeting Windows XP by default.
 #define _WIN32_WINNT 0x0501
 #define WINVER 0x0501
 #endif
 
+#define NOMINMAX
 #include <windows.h> // @Incomplete - get rid of this include
 #include <dsound.h> // @Incomplete - get rid of this include
 #include <intrin.h> // @Incomplete - get rid of this include
 #include <hidclass.h> // @Incomplete - get rid of this include
 #include <hidsdi.h> // @Incomplete - get rid of this include
 #include <hidpi.h> // @Incomplete - get rid of this include
+#undef near
+#undef far
 
-
-typedef void LK_Client_Init_Function(LK_Platform* platform);
-typedef void LK_Client_Close_Function(LK_Platform* platform);
-typedef void LK_Client_Frame_Function(LK_Platform* platform);
-typedef void LK_Client_Audio_Function(LK_Platform* platform, LK_S16* samples);
-typedef void LK_Client_Log(LK_Platform* platform, const char* message, const char* file, int line);
-typedef void LK_Client_Dll_Load_Function(LK_Platform* platform);
-typedef void LK_Client_Dll_Unload_Function(LK_Platform* platform);
 typedef BOOL LK_Client_Win32_Event_Handler(LK_Platform* platform, HWND window, UINT message, WPARAM wparam, LPARAM lparam, LRESULT* out_return);
 
 enum
@@ -560,6 +577,8 @@ typedef struct
 
 typedef struct
 {
+    LK_Platform* platform;
+
     struct
     {
         FILETIME last_dll_write_time;
@@ -571,7 +590,7 @@ typedef struct
         LK_Client_Close_Function* close;
         LK_Client_Frame_Function* frame;
         LK_Client_Audio_Function* audio;
-        LK_Client_Log* log;
+        LK_Client_Log_Function* log;
         LK_Client_Dll_Load_Function* dll_load;
         LK_Client_Dll_Unload_Function* dll_unload;
         LK_Client_Win32_Event_Handler* win32_event_handler;
@@ -591,6 +610,7 @@ typedef struct
         BITMAPINFO bitmap_info;
 
         char* title;
+        WCHAR class_name[128];
 
         LK_S32 x;
         LK_S32 y;
@@ -649,13 +669,10 @@ typedef struct
         LK_U64 unprocessed_microseconds;
         LK_U64 unprocessed_milliseconds;
     } time;
-} LK_Platform_Private;
-
-static LK_Platform lk_platform;
-static LK_Platform_Private lk_private;
+} LK_Private;
 
 
-#define LK_Log(message)  lk_private.client.log(&lk_platform, message, __FILE__, __LINE__)
+#define LK_Log(message)  lk_private->client.log(lk_platform, message, __FILE__, __LINE__)
 
 #define LK_GetProc(module, destination, name)    \
 {                                                \
@@ -682,23 +699,37 @@ static void lk_client_log_stub(LK_Platform* platform, const char* message, const
     OutputDebugStringA(message);
 }
 
-static void lk_load_client_functions_from_module(HMODULE module)
+static void lk_copy_client_functions(LK_Private* lk_private, LK_Platform* lk_platform, LK_Client_Functions* functions)
 {
-    lk_private.client.init                = lk_client_init_stub;
-    lk_private.client.close               = lk_client_close_stub;
-    lk_private.client.frame               = lk_client_frame_stub;
-    lk_private.client.audio               = lk_client_audio_stub;
-    lk_private.client.log                 = lk_client_log_stub;
-    lk_private.client.dll_load            = lk_client_dll_load_stub;
-    lk_private.client.dll_unload          = lk_client_dll_unload_stub;
-    lk_private.client.win32_event_handler = lk_client_win32_event_handler_stub;
+    #define LK_CopyClientFunction(name) lk_private->client.name = functions->name ? functions->name : lk_client_##name##_stub;
+    LK_CopyClientFunction(init);
+    LK_CopyClientFunction(close);
+    LK_CopyClientFunction(frame);
+    LK_CopyClientFunction(audio);
+    LK_CopyClientFunction(log);
+    LK_CopyClientFunction(dll_load);
+    LK_CopyClientFunction(dll_unload);
+    #undef LK_CopyClientFunction
+    lk_private->client.win32_event_handler = lk_client_win32_event_handler_stub;
+}
 
-    lk_private.client.library = module;
+static void lk_load_client_functions_from_module(LK_Private* lk_private, LK_Platform* lk_platform, HMODULE module)
+{
+    lk_private->client.init                = lk_client_init_stub;
+    lk_private->client.close               = lk_client_close_stub;
+    lk_private->client.frame               = lk_client_frame_stub;
+    lk_private->client.audio               = lk_client_audio_stub;
+    lk_private->client.log                 = lk_client_log_stub;
+    lk_private->client.dll_load            = lk_client_dll_load_stub;
+    lk_private->client.dll_unload          = lk_client_dll_unload_stub;
+    lk_private->client.win32_event_handler = lk_client_win32_event_handler_stub;
+
+    lk_private->client.library = module;
     if (module)
     {
-        lk_private.client.load_failed = 0;
+        lk_private->client.load_failed = 0;
 
-        #define LK_GetClientFunction(name) LK_GetProc(module, lk_private.client.name, "lk_client_" #name)
+        #define LK_GetClientFunction(name) LK_GetProc(module, lk_private->client.name, "lk_client_" #name)
         LK_GetClientFunction(init);
         LK_GetClientFunction(close);
         LK_GetClientFunction(frame);
@@ -709,36 +740,36 @@ static void lk_load_client_functions_from_module(HMODULE module)
         LK_GetClientFunction(win32_event_handler);
         #undef LK_GetClientFunction
 
-        lk_private.client.dll_load(&lk_platform);
+        lk_private->client.dll_load(lk_platform);
     }
     else
     {
-        lk_private.client.load_failed = 1;
+        lk_private->client.load_failed = 1;
         LK_Log("Failed to load the client module.");
     }
 }
 
 #ifdef LK_PLATFORM_NO_DLL
 
-static void lk_set_client_functions()
+static void lk_set_client_functions(LK_Private* lk_private, LK_Platform* lk_platform)
 {
     HMODULE module = GetModuleHandle(NULL);
-    lk_load_client_functions_from_module(module);
+    lk_load_client_functions_from_module(lk_private, lk_platform, module);
 }
 
 #else
 
 #ifndef LK_PLATFORM_DLL_NAME
-#error "lk_platform.h implementation expects LK_PLATFORM_DLL_NAME to be defined before it is included."
+#error "lk_platform->h implementation expects LK_PLATFORM_DLL_NAME to be defined before it is included."
 #endif
 
-static void lk_get_dll_path()
+static void lk_get_dll_path(LK_Private* lk_private)
 {
     const char dll_name[] = LK_PLATFORM_DLL_NAME ".dll";
 
-    LPSTR dll_path = lk_private.client.dll_path;
+    LPSTR dll_path = lk_private->client.dll_path;
 
-    DWORD directory_length = GetModuleFileNameA(0, dll_path, sizeof(lk_private.client.dll_path)); // @Incomplete - the buffer could be too small!
+    DWORD directory_length = GetModuleFileNameA(0, dll_path, sizeof(lk_private->client.dll_path)); // @Incomplete - the buffer could be too small!
     while (dll_path[directory_length] != '\\' && dll_path[directory_length] != '/')
         directory_length--;
     directory_length++;
@@ -746,9 +777,9 @@ static void lk_get_dll_path()
     CopyMemory(dll_path + directory_length, dll_name, sizeof(dll_name) + 1);
 }
 
-static LK_B32 lk_check_client_reload()
+static LK_B32 lk_check_client_reload(LK_Private* lk_private)
 {
-    if (lk_private.client.load_failed)
+    if (lk_private->client.load_failed)
     {
         return 1;
     }
@@ -757,23 +788,23 @@ static LK_B32 lk_check_client_reload()
     ZeroMemory(&file_time, sizeof(FILETIME));
 
     WIN32_FIND_DATAA find_data;
-    HANDLE find_handle = FindFirstFile(lk_private.client.dll_path, &find_data);
+    HANDLE find_handle = FindFirstFile(lk_private->client.dll_path, &find_data);
     if (find_handle != INVALID_HANDLE_VALUE)
     {
         file_time = find_data.ftLastWriteTime;
         FindClose(find_handle);
     }
 
-    if (CompareFileTime(&file_time, &lk_private.client.last_dll_write_time) != 0)
+    if (CompareFileTime(&file_time, &lk_private->client.last_dll_write_time) != 0)
     {
-        lk_private.client.last_dll_write_time = file_time;
+        lk_private->client.last_dll_write_time = file_time;
         return 1;
     }
 
     return 0;
 }
 
-static void lk_get_temp_dll_path()
+static void lk_get_temp_dll_path(LK_Private* lk_private)
 {
     // Get process serial number
     LONG serial = 0;
@@ -786,10 +817,10 @@ static void lk_get_temp_dll_path()
     }
 
     // Copy dll_path over to temp_dll_path
-    char* temp_dll_path = lk_private.client.temp_dll_path;
+    char* temp_dll_path = lk_private->client.temp_dll_path;
 
     int dll_path_length = 0;
-    for (char* dll_path = lk_private.client.dll_path; *dll_path; dll_path++, temp_dll_path++)
+    for (char* dll_path = lk_private->client.dll_path; *dll_path; dll_path++, temp_dll_path++)
     {
         *temp_dll_path = *dll_path;
         dll_path_length++;
@@ -813,19 +844,19 @@ static void lk_get_temp_dll_path()
     CopyMemory(temp_dll_path, ".dll", 5);
 }
 
-static void lk_delete_temp_dll()
+static void lk_delete_temp_dll(LK_Private* lk_private)
 {
-    LPSTR temp_dll_path = lk_private.client.temp_dll_path;
+    LPSTR temp_dll_path = lk_private->client.temp_dll_path;
     if (temp_dll_path[0])
     {
         DeleteFileA(temp_dll_path);
     }
 }
 
-static void lk_load_client()
+static void lk_load_client(LK_Private* lk_private, LK_Platform* lk_platform)
 {
-    LPSTR dll_path = lk_private.client.dll_path;
-    LPSTR temp_dll_path = lk_private.client.temp_dll_path;
+    LPSTR dll_path = lk_private->client.dll_path;
+    LPSTR temp_dll_path = lk_private->client.temp_dll_path;
 
     if (!CopyFileA(dll_path, temp_dll_path, 0))
     {
@@ -833,47 +864,47 @@ static void lk_load_client()
     }
 
     HMODULE library = LoadLibraryA(temp_dll_path);
-    lk_load_client_functions_from_module(library);
+    lk_load_client_functions_from_module(lk_private, lk_platform, library);
 }
 
-static void lk_unload_client()
+static void lk_unload_client(LK_Private* lk_private, LK_Platform* lk_platform)
 {
-    if (lk_private.client.library)
+    if (lk_private->client.library)
     {
-        lk_private.client.dll_unload(&lk_platform);
+        lk_private->client.dll_unload(lk_platform);
 
-        if (!FreeLibrary(lk_private.client.library))
+        if (!FreeLibrary(lk_private->client.library))
         {
             LK_Log("Failed to release the client DLL.");
         }
 
-        lk_private.client.library = 0;
-        lk_private.client.init = 0;
-        lk_private.client.close = 0;
-        lk_private.client.frame = 0;
-        lk_private.client.audio = 0;
-        lk_private.client.dll_load = 0;
-        lk_private.client.dll_unload = 0;
-        lk_private.client.win32_event_handler = 0;
+        lk_private->client.library = 0;
+        lk_private->client.init = 0;
+        lk_private->client.close = 0;
+        lk_private->client.frame = 0;
+        lk_private->client.audio = 0;
+        lk_private->client.dll_load = 0;
+        lk_private->client.dll_unload = 0;
+        lk_private->client.win32_event_handler = 0;
     }
 
-    lk_delete_temp_dll();
+    lk_delete_temp_dll(lk_private);
 }
 
 #endif
 
-static LONG lk_apply_window_style(LONG old_style, LK_B32 ignore_fullscreen)
+static LONG lk_apply_window_style(LK_Platform* lk_platform, LONG old_style, LK_B32 ignore_fullscreen)
 {
     LONG resizable_flags = WS_THICKFRAME | WS_MAXIMIZEBOX;
     LONG decoration_flags = WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
 
     LONG style = old_style & ~(resizable_flags | decoration_flags | WS_POPUP);
 
-    LK_B32 fullscreen = lk_platform.window.fullscreen && !ignore_fullscreen;
-    if (!lk_platform.window.undecorated && !fullscreen)
+    LK_B32 fullscreen = lk_platform->window.fullscreen && !ignore_fullscreen;
+    if (!lk_platform->window.undecorated && !fullscreen)
     {
         style |= decoration_flags;
-        if (!lk_platform.window.forbid_resizing)
+        if (!lk_platform->window.forbid_resizing)
         {
             style |= resizable_flags;
         }
@@ -886,58 +917,58 @@ static LONG lk_apply_window_style(LONG old_style, LK_B32 ignore_fullscreen)
     return style;
 }
 
-static void lk_push_window_data()
+static void lk_push_window_data(LK_Private* lk_private, LK_Platform* lk_platform)
 {
-    HWND window = lk_private.window.handle;
+    HWND window = lk_private->window.handle;
 
-    LK_B32 toggle_fullscreen = (lk_private.window.fullscreen != lk_platform.window.fullscreen);
+    LK_B32 toggle_fullscreen = (lk_private->window.fullscreen != lk_platform->window.fullscreen);
     if (toggle_fullscreen)
     {
         // remember/restore where the window was before it was toggled to fullscreen
-        if (lk_platform.window.fullscreen)
+        if (lk_platform->window.fullscreen)
         {
-            lk_private.window.x_before_fullscreen = lk_platform.window.x;
-            lk_private.window.y_before_fullscreen = lk_platform.window.y;
-            lk_private.window.width_before_fullscreen = lk_platform.window.width;
-            lk_private.window.height_before_fullscreen = lk_platform.window.height;
+            lk_private->window.x_before_fullscreen = lk_platform->window.x;
+            lk_private->window.y_before_fullscreen = lk_platform->window.y;
+            lk_private->window.width_before_fullscreen = lk_platform->window.width;
+            lk_private->window.height_before_fullscreen = lk_platform->window.height;
 
             HMONITOR monitor = MonitorFromWindow(window, MONITOR_DEFAULTTOPRIMARY);
             MONITORINFO monitor_info;
             monitor_info.cbSize = sizeof(monitor_info);
             GetMonitorInfo(monitor, &monitor_info);
 
-            lk_platform.window.x = monitor_info.rcMonitor.left;
-            lk_platform.window.y = monitor_info.rcMonitor.top;
-            lk_platform.window.width = monitor_info.rcMonitor.right - monitor_info.rcMonitor.left;
-            lk_platform.window.height = monitor_info.rcMonitor.bottom - monitor_info.rcMonitor.top;
+            lk_platform->window.x = monitor_info.rcMonitor.left;
+            lk_platform->window.y = monitor_info.rcMonitor.top;
+            lk_platform->window.width = monitor_info.rcMonitor.right - monitor_info.rcMonitor.left;
+            lk_platform->window.height = monitor_info.rcMonitor.bottom - monitor_info.rcMonitor.top;
         }
         else
         {
-            lk_platform.window.x = lk_private.window.x_before_fullscreen;
-            lk_platform.window.y = lk_private.window.y_before_fullscreen;
-            lk_platform.window.width = lk_private.window.width_before_fullscreen;
-            lk_platform.window.height = lk_private.window.height_before_fullscreen;
+            lk_platform->window.x = lk_private->window.x_before_fullscreen;
+            lk_platform->window.y = lk_private->window.y_before_fullscreen;
+            lk_platform->window.width = lk_private->window.width_before_fullscreen;
+            lk_platform->window.height = lk_private->window.height_before_fullscreen;
         }
     }
 
     if (toggle_fullscreen ||
-        (lk_private.window.x               != lk_platform.window.x              ) ||
-        (lk_private.window.y               != lk_platform.window.y              ) ||
-        (lk_private.window.width           != lk_platform.window.width          ) ||
-        (lk_private.window.height          != lk_platform.window.height         ) ||
-        (lk_private.window.forbid_resizing != lk_platform.window.forbid_resizing) ||
-        (lk_private.window.undecorated     != lk_platform.window.undecorated    ) ||
-        (lk_private.window.invisible       != lk_platform.window.invisible      ))
+        (lk_private->window.x               != lk_platform->window.x              ) ||
+        (lk_private->window.y               != lk_platform->window.y              ) ||
+        (lk_private->window.width           != lk_platform->window.width          ) ||
+        (lk_private->window.height          != lk_platform->window.height         ) ||
+        (lk_private->window.forbid_resizing != lk_platform->window.forbid_resizing) ||
+        (lk_private->window.undecorated     != lk_platform->window.undecorated    ) ||
+        (lk_private->window.invisible       != lk_platform->window.invisible      ))
     {
         LONG style = GetWindowLong(window, GWL_STYLE);
         LONG extended_style = GetWindowLong(window, GWL_EXSTYLE);
 
-        style = lk_apply_window_style(style, 0);
+        style = lk_apply_window_style(lk_platform, style, 0);
         SetWindowLong(window, GWL_STYLE, style);
 
         // client dimensions to window dimensions
-        LK_U32 width = lk_platform.window.width;
-        LK_U32 height = lk_platform.window.height;
+        LK_U32 width = lk_platform->window.width;
+        LK_U32 height = lk_platform->window.height;
 
         RECT window_bounds;
         window_bounds.left = 0;
@@ -950,63 +981,63 @@ static void lk_push_window_data()
         height = window_bounds.bottom - window_bounds.top;
 
         // move and resize the window
-        LK_S32 x = lk_platform.window.x + window_bounds.left;
-        LK_S32 y = lk_platform.window.y + window_bounds.top;
+        LK_S32 x = lk_platform->window.x + window_bounds.left;
+        LK_S32 y = lk_platform->window.y + window_bounds.top;
 
 
         UINT swp_flags = SWP_NOOWNERZORDER | SWP_FRAMECHANGED;
         if (!toggle_fullscreen) swp_flags |= SWP_NOZORDER;
         SetWindowPos(window, HWND_TOP, x, y, width, height, swp_flags);
-        ShowWindow(window, lk_platform.window.invisible ? SW_HIDE : SW_SHOW);
+        ShowWindow(window, lk_platform->window.invisible ? SW_HIDE : SW_SHOW);
 
-        lk_private.window.fullscreen = lk_platform.window.fullscreen;
-        lk_private.window.forbid_resizing = lk_platform.window.forbid_resizing;
-        lk_private.window.undecorated = lk_platform.window.undecorated;
-        lk_private.window.invisible = lk_platform.window.invisible;
+        lk_private->window.fullscreen = lk_platform->window.fullscreen;
+        lk_private->window.forbid_resizing = lk_platform->window.forbid_resizing;
+        lk_private->window.undecorated = lk_platform->window.undecorated;
+        lk_private->window.invisible = lk_platform->window.invisible;
     }
 }
 
-static void lk_window_update_title()
+static void lk_window_update_title(LK_Private* lk_private, LK_Platform* lk_platform)
 {
-    char* new_title = lk_platform.window.title;
+    char* new_title = lk_platform->window.title;
     if (new_title)
     {
-        HWND window = lk_private.window.handle;
+        HWND window = lk_private->window.handle;
         SetWindowTextA(window, new_title);
 
-        lk_platform.window.title = NULL;
+        lk_platform->window.title = NULL;
     }
 }
 
-static void lk_push()
+static void lk_push(LK_Private* lk_private, LK_Platform* lk_platform)
 {
-    HWND window = lk_private.window.handle;
+    HWND window = lk_private->window.handle;
     if (!window)
     {
         return;
     }
 
-    lk_platform.mouse.delta_x = 0;
-    lk_platform.mouse.delta_y = 0;
-    lk_platform.mouse.delta_wheel = 0;
+    lk_platform->mouse.delta_x = 0;
+    lk_platform->mouse.delta_y = 0;
+    lk_platform->mouse.delta_wheel = 0;
 
-    lk_private.keyboard.text_size = 0;
-    lk_private.keyboard.text_buffer[0] = 0;
-    lk_platform.keyboard.text = lk_private.keyboard.text_buffer;
+    lk_private->keyboard.text_size = 0;
+    lk_private->keyboard.text_buffer[0] = 0;
+    lk_platform->keyboard.text = lk_private->keyboard.text_buffer;
 
-    lk_push_window_data();
-    lk_window_update_title();
+    lk_push_window_data(lk_private, lk_platform);
+    lk_window_update_title(lk_private, lk_platform);
 
     for (int key_index = 0; key_index < LK__KEY_COUNT; key_index++)
     {
-        lk_platform.keyboard.state[key_index].repeated = 0;
+        lk_platform->keyboard.state[key_index].repeated = 0;
     }
 }
 
 
-static void lk_pull_window_data()
+static void lk_pull_window_data(LK_Private* lk_private, LK_Platform* lk_platform)
 {
-    HWND window = lk_private.window.handle;
+    HWND window = lk_private->window.handle;
 
     // get width and height
     RECT client_rect;
@@ -1015,31 +1046,31 @@ static void lk_pull_window_data()
     LK_U32 width = (LK_U32)(client_rect.right - client_rect.left);
     LK_U32 height = (LK_U32)(client_rect.bottom - client_rect.top);
 
-    lk_platform.window.width = width;
-    lk_platform.window.height = height;
-    lk_private.window.width = width;
-    lk_private.window.height = height;
+    lk_platform->window.width = width;
+    lk_platform->window.height = height;
+    lk_private->window.width = width;
+    lk_private->window.height = height;
 
     // get X and Y
     POINT window_position = { client_rect.left, client_rect.top };
     ClientToScreen(window, &window_position);
 
-    lk_platform.window.x = window_position.x;
-    lk_platform.window.y = window_position.y;
-    lk_private.window.x = window_position.x;
-    lk_private.window.y = window_position.y;
+    lk_platform->window.x = window_position.x;
+    lk_platform->window.y = window_position.y;
+    lk_private->window.x = window_position.x;
+    lk_private->window.y = window_position.y;
 }
 
-static void lk_pull_mouse_data()
+static void lk_pull_mouse_data(LK_Platform* lk_platform)
 {
     POINT mouse_position;
     GetCursorPos(&mouse_position);
 
-    mouse_position.x -= lk_platform.window.x;
-    mouse_position.y -= lk_platform.window.y;
+    mouse_position.x -= lk_platform->window.x;
+    mouse_position.y -= lk_platform->window.y;
 
-    lk_platform.mouse.x = mouse_position.x;
-    lk_platform.mouse.y = mouse_position.y;
+    lk_platform->mouse.x = mouse_position.x;
+    lk_platform->mouse.y = mouse_position.y;
 }
 
 static void lk_update_digital_button(LK_Digital_Button* button)
@@ -1049,21 +1080,21 @@ static void lk_update_digital_button(LK_Digital_Button* button)
     button->was_down = button->down;
 }
 
-static void lk_update_canvas()
+static void lk_update_canvas(LK_Private* lk_private, LK_Platform* lk_platform)
 {
-    LK_U32 width = lk_platform.window.width;
-    LK_U32 height = lk_platform.window.height;
-    LK_U32 canvas_width = lk_platform.canvas.width;
-    LK_U32 canvas_height = lk_platform.canvas.height;
+    LK_U32 width = lk_platform->window.width;
+    LK_U32 height = lk_platform->window.height;
+    LK_U32 canvas_width = lk_platform->canvas.width;
+    LK_U32 canvas_height = lk_platform->canvas.height;
 
     if (width != canvas_width || height != canvas_height)
     {
-        if (lk_platform.canvas.data)
+        if (lk_platform->canvas.data)
         {
-            VirtualFree(lk_platform.canvas.data, 0, MEM_RELEASE);
+            VirtualFree(lk_platform->canvas.data, 0, MEM_RELEASE);
         }
 
-        BITMAPINFOHEADER* header = &lk_private.window.bitmap_info.bmiHeader;
+        BITMAPINFOHEADER* header = &lk_private->window.bitmap_info.bmiHeader;
         header->biSize = sizeof(BITMAPINFOHEADER);
         header->biWidth = width;
         header->biHeight = height;
@@ -1074,35 +1105,35 @@ static void lk_update_canvas()
         LK_U32 bytes_per_pixel = 4;
         LK_U32 canvas_size = width * height * bytes_per_pixel;
 
-        lk_platform.canvas.data = (LK_U8*) VirtualAlloc(0, canvas_size, MEM_COMMIT, PAGE_READWRITE);
-        lk_platform.canvas.width = width;
-        lk_platform.canvas.height = height;
+        lk_platform->canvas.data = (LK_U8*) VirtualAlloc(0, canvas_size, MEM_COMMIT, PAGE_READWRITE);
+        lk_platform->canvas.width = width;
+        lk_platform->canvas.height = height;
     }
 }
 
-static void lk_pull()
+static void lk_pull(LK_Private* lk_private, LK_Platform* lk_platform)
 {
-    HWND window = lk_private.window.handle;
+    HWND window = lk_private->window.handle;
     if (!window)
     {
         return;
     }
 
-    lk_pull_window_data();
-    lk_pull_mouse_data();
+    lk_pull_window_data(lk_private, lk_platform);
+    lk_pull_mouse_data(lk_platform);
 
-    lk_update_digital_button(&lk_platform.mouse.left_button);
-    lk_update_digital_button(&lk_platform.mouse.right_button);
+    lk_update_digital_button(&lk_platform->mouse.left_button);
+    lk_update_digital_button(&lk_platform->mouse.right_button);
 
     for (int key_index = 0; key_index < LK__KEY_COUNT; key_index++)
     {
-        LK_Digital_Button* button = lk_platform.keyboard.state + key_index;
+        LK_Digital_Button* button = lk_platform->keyboard.state + key_index;
         lk_update_digital_button(button);
     }
 
     for (int gamepad_index = 0; gamepad_index < LK_MAX_GAMEPADS; gamepad_index++)
     {
-        LK_Gamepad* gamepad = &lk_platform.gamepads[gamepad_index];
+        LK_Gamepad* gamepad = &lk_platform->gamepads[gamepad_index];
         for (int button_index = 0; button_index < LK_GAMEPAD_BUTTON_COUNT; button_index++)
         {
             LK_Digital_Button* button = &gamepad->buttons[button_index];
@@ -1110,37 +1141,37 @@ static void lk_pull()
         }
     }
 
-    if (lk_private.window.backend == LK_WINDOW_CANVAS)
+    if (lk_private->window.backend == LK_WINDOW_CANVAS)
     {
-        lk_update_canvas();
+        lk_update_canvas(lk_private, lk_platform);
     }
 }
 
 
-static void lk_update_swap_interval()
+static void lk_update_swap_interval(LK_Private* lk_private, LK_Platform* lk_platform)
 {
-    if (lk_private.opengl.wglSwapIntervalEXT)
+    if (lk_private->opengl.wglSwapIntervalEXT)
     {
-        int interval = lk_platform.opengl.swap_interval;
-        lk_private.opengl.wglSwapIntervalEXT(interval);
+        int interval = lk_platform->opengl.swap_interval;
+        lk_private->opengl.wglSwapIntervalEXT(interval);
     }
 }
 
-static void lk_repaint_canvas_rectangle(HDC device_context, int x, int y, int width, int height)
+static void lk_repaint_canvas_rectangle(LK_Private* lk_private, LK_Platform* lk_platform, HDC device_context, int x, int y, int width, int height)
 {
-    if (!lk_platform.canvas.data)
+    if (!lk_platform->canvas.data)
     {
         return;
     }
 
-    void* pixels = lk_platform.canvas.data;
-    BITMAPINFO* info = &lk_private.window.bitmap_info;
+    void* pixels = lk_platform->canvas.data;
+    BITMAPINFO* info = &lk_private->window.bitmap_info;
 
     // @Optimization - actually use the given dirty rectangle
-    LK_U32 window_width = lk_platform.window.width;
-    LK_U32 window_height = lk_platform.window.height;
-    LK_U32 bitmap_width = lk_platform.canvas.width;
-    LK_U32 bitmap_height = lk_platform.canvas.height;
+    LK_U32 window_width = lk_platform->window.width;
+    LK_U32 window_height = lk_platform->window.height;
+    LK_U32 bitmap_width = lk_platform->canvas.width;
+    LK_U32 bitmap_height = lk_platform->canvas.height;
 
     StretchDIBits(device_context,
         0, 0, window_width, window_height,
@@ -1153,13 +1184,19 @@ static void lk_repaint_canvas_rectangle(HDC device_context, int x, int y, int wi
 static LRESULT CALLBACK
 lk_window_callback(HWND window, UINT message, WPARAM wparam, LPARAM lparam)
 {
+    LK_Private* lk_private = (LK_Private*) GetWindowLongPtrA(window, GWLP_USERDATA);
+    if (!lk_private)
+        return DefWindowProcW(window, message, wparam, lparam);
+
+    LK_Platform* lk_platform = lk_private->platform;
+
     LPARAM user_return;
-    if (lk_private.client.win32_event_handler(&lk_platform, window, message, wparam, lparam, &user_return))
+    if (lk_private->client.win32_event_handler(lk_platform, window, message, wparam, lparam, &user_return))
     {
         return user_return;
     }
 
-    if (window != lk_private.window.handle)
+    if (window != lk_private->window.handle)
     {
         return DefWindowProcW(window, message, wparam, lparam);
     }
@@ -1169,7 +1206,7 @@ lk_window_callback(HWND window, UINT message, WPARAM wparam, LPARAM lparam)
 
     case WM_CLOSE:
     {
-        lk_platform.break_frame_loop = 1;
+        lk_platform->break_frame_loop = 1;
     } break;
 
     case WM_CHAR:
@@ -1181,14 +1218,14 @@ lk_window_callback(HWND window, UINT message, WPARAM wparam, LPARAM lparam)
 
         int length = WideCharToMultiByte(CP_UTF8, 0, &utf16, 1, utf8, sizeof(utf8), 0, 0);
 
-        int old_text_size = lk_private.keyboard.text_size;
+        int old_text_size = lk_private->keyboard.text_size;
         int new_text_size = old_text_size + length;
         if (length && new_text_size < LK_MAX_TEXT_SIZE)
         {
-            lk_private.keyboard.text_size = new_text_size;
+            lk_private->keyboard.text_size = new_text_size;
 
             char* read = &utf8[0];
-            char* write = lk_private.keyboard.text_buffer + old_text_size;
+            char* write = lk_private->keyboard.text_buffer + old_text_size;
             while (length--)
             {
                 *(write++) = *(read++);
@@ -1203,7 +1240,7 @@ lk_window_callback(HWND window, UINT message, WPARAM wparam, LPARAM lparam)
         UINT struct_size;
         GetRawInputData((HRAWINPUT) lparam, RID_INPUT, 0, &struct_size, sizeof(RAWINPUTHEADER));
 
-        static char struct_memory[256];
+        char struct_memory[256];
         if (struct_size > sizeof(struct_memory))
         {
             // @Reconsider - I never seem to get any input structures larger than 48 bytes, so 256 bytes should be fine.
@@ -1223,30 +1260,30 @@ lk_window_callback(HWND window, UINT message, WPARAM wparam, LPARAM lparam)
         {
             USHORT button_flags = input->data.mouse.usButtonFlags;
 
-            lk_platform.mouse.delta_x += input->data.mouse.lLastX;
-            lk_platform.mouse.delta_y += input->data.mouse.lLastY;
+            lk_platform->mouse.delta_x += input->data.mouse.lLastX;
+            lk_platform->mouse.delta_y += input->data.mouse.lLastY;
 
             if (button_flags & RI_MOUSE_LEFT_BUTTON_DOWN)
             {
-                lk_platform.mouse.left_button.down = 1;
+                lk_platform->mouse.left_button.down = 1;
             }
             if (button_flags & RI_MOUSE_LEFT_BUTTON_UP)
             {
-                lk_platform.mouse.left_button.down = 0;
+                lk_platform->mouse.left_button.down = 0;
             }
 
             if (button_flags & RI_MOUSE_RIGHT_BUTTON_DOWN)
             {
-                lk_platform.mouse.right_button.down = 1;
+                lk_platform->mouse.right_button.down = 1;
             }
             if (button_flags & RI_MOUSE_RIGHT_BUTTON_UP)
             {
-                lk_platform.mouse.right_button.down = 0;
+                lk_platform->mouse.right_button.down = 0;
             }
 
             if (button_flags & RI_MOUSE_WHEEL)
             {
-                lk_platform.mouse.delta_wheel += ((SHORT) input->data.mouse.usButtonData) / WHEEL_DELTA;
+                lk_platform->mouse.delta_wheel += ((SHORT) input->data.mouse.usButtonData) / WHEEL_DELTA;
             }
         }
 
@@ -1353,9 +1390,9 @@ lk_window_callback(HWND window, UINT message, WPARAM wparam, LPARAM lparam)
                 int is_down = (flags & RI_KEY_BREAK) == 0;
                 if (is_down)
                 {
-                    lk_platform.keyboard.state[key].repeated = 1;
+                    lk_platform->keyboard.state[key].repeated = 1;
                 }
-                lk_platform.keyboard.state[key].down = is_down;
+                lk_platform->keyboard.state[key].down = is_down;
             }
         }
 
@@ -1393,7 +1430,7 @@ lk_window_callback(HWND window, UINT message, WPARAM wparam, LPARAM lparam)
                 capabilities.Usage == 5)   // gamepad input
             {
                 LK_U32 gamepad_index = 0;  // @Incomplete - handle multiple gamepads
-                LK_Gamepad* gamepad = &lk_platform.gamepads[gamepad_index];
+                LK_Gamepad* gamepad = &lk_platform->gamepads[gamepad_index];
 
                 CHAR* raw_data = (CHAR*)(input->data.hid.bRawData);
                 ULONG raw_size = input->data.hid.dwSizeHid;
@@ -1524,7 +1561,7 @@ lk_window_callback(HWND window, UINT message, WPARAM wparam, LPARAM lparam)
 
     case WM_PAINT:
     {
-        if (lk_private.window.backend == LK_WINDOW_CANVAS)
+        if (lk_private->window.backend == LK_WINDOW_CANVAS)
         {
             PAINTSTRUCT paint;
             HDC device_context = BeginPaint(window, &paint);
@@ -1534,7 +1571,7 @@ lk_window_callback(HWND window, UINT message, WPARAM wparam, LPARAM lparam)
             int width = paint.rcPaint.right - x;
             int height = paint.rcPaint.bottom - y;
 
-            lk_repaint_canvas_rectangle(device_context, x, y, width, height);
+            lk_repaint_canvas_rectangle(lk_private, lk_platform, device_context, x, y, width, height);
 
             EndPaint(window, &paint);
         }
@@ -1549,7 +1586,7 @@ lk_window_callback(HWND window, UINT message, WPARAM wparam, LPARAM lparam)
 
     case WM_TIMER:
     {
-        SwitchToFiber(lk_private.window.main_fiber);
+        SwitchToFiber(lk_private->window.main_fiber);
     } break;
 
     case WM_ENTERMENULOOP:
@@ -1583,7 +1620,7 @@ lk_window_callback(HWND window, UINT message, WPARAM wparam, LPARAM lparam)
             return 0;
 
         if (command == SC_SCREENSAVE || command == SC_MONITORPOWER)
-            if (lk_private.window.fullscreen)
+            if (lk_private->window.fullscreen)
                 return 0;
 
         goto run_default_proc;
@@ -1601,18 +1638,18 @@ run_default_proc:
     return DefWindowProcW(window, message, wparam, lparam);
 }
 
-static void lk_fill_default_window_settings(HINSTANCE instance)
+static void lk_fill_default_window_settings(LK_Private* lk_private, LK_Platform* lk_platform, HINSTANCE instance)
 {
-    if (!lk_platform.window.title)
+    if (!lk_platform->window.title)
     {
-        lk_platform.window.title = "app";
+        lk_platform->window.title = "app";
     }
 
 
-    LK_B32 default_x      = (lk_platform.window.x == LK_DEFAULT_POSITION);
-    LK_B32 default_y      = (lk_platform.window.y == LK_DEFAULT_POSITION);
-    LK_B32 default_width  = !lk_platform.window.width;
-    LK_B32 default_height = !lk_platform.window.height;
+    LK_B32 default_x      = (lk_platform->window.x == LK_DEFAULT_POSITION);
+    LK_B32 default_y      = (lk_platform->window.y == LK_DEFAULT_POSITION);
+    LK_B32 default_width  = !lk_platform->window.width;
+    LK_B32 default_height = !lk_platform->window.height;
 
     LK_B32 default_position = default_x || default_y;
     LK_B32 default_size = default_width || default_height;
@@ -1630,7 +1667,7 @@ static void lk_fill_default_window_settings(HINSTANCE instance)
         client_rect.right = 600;
         client_rect.bottom = 600;
 
-        HWND temp_window = CreateWindowExW(0, LK_WINDOW_CLASS_NAME, L"", 0, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, 0, 0, instance, 0);
+        HWND temp_window = CreateWindowExW(0, lk_private->window.class_name, L"", 0, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, 0, 0, instance, 0);
         if (temp_window)
         {
             GetClientRect(temp_window, &client_rect);
@@ -1644,8 +1681,8 @@ static void lk_fill_default_window_settings(HINSTANCE instance)
         LK_U32 width = client_rect.right - client_rect.left;
         LK_U32 height = client_rect.bottom - client_rect.top;
 
-        if (default_width) lk_platform.window.width = width;
-        if (default_height) lk_platform.window.height = height;
+        if (default_width) lk_platform->window.width = width;
+        if (default_height) lk_platform->window.height = height;
     }
 
     if (default_position)
@@ -1658,8 +1695,8 @@ static void lk_fill_default_window_settings(HINSTANCE instance)
         monitor_info.cbSize = sizeof(monitor_info);
         if (GetMonitorInfo(monitor, &monitor_info))
         {
-            int width = lk_platform.window.width;
-            int height = lk_platform.window.height;
+            int width = lk_platform->window.width;
+            int height = lk_platform->window.height;
 
             RECT window_bounds;
             window_bounds.left = 0;
@@ -1679,12 +1716,12 @@ static void lk_fill_default_window_settings(HINSTANCE instance)
             LK_Log("Failed to set the default window position; couldn't get the screen size.");
         }
 
-        if (default_x) lk_platform.window.x = x;
-        if (default_y) lk_platform.window.y = y;
+        if (default_x) lk_platform->window.x = x;
+        if (default_y) lk_platform->window.y = y;
     }
 }
 
-static void lk_disable_window_animations(HMODULE dwmapi, HWND window)
+static void lk_disable_window_animations(LK_Private* lk_private, LK_Platform* lk_platform, HMODULE dwmapi, HWND window)
 {
     const DWORD DWMWA_TRANSITIONS_FORCEDISABLED = 2;
 
@@ -1698,7 +1735,7 @@ static void lk_disable_window_animations(HMODULE dwmapi, HWND window)
     }
 }
 
-static void lk_enable_window_transparency(HMODULE dwmapi, HWND window)
+static void lk_enable_window_transparency(LK_Private* lk_private, LK_Platform* lk_platform, HMODULE dwmapi, HWND window)
 {
     const DWORD LK_DWM_BB_ENABLE = 1;
 
@@ -1743,10 +1780,10 @@ static void lk_enable_window_transparency(HMODULE dwmapi, HWND window)
 }
 
 
-static void lk_set_window_icon(HWND window, HDC dc)
+static void lk_set_window_icon(LK_Private* lk_private, LK_Platform* lk_platform, HWND window, HDC dc)
 {
-    LK_U32 width = lk_platform.window.icon_width;
-    LK_U32 height = lk_platform.window.icon_height;
+    LK_U32 width = lk_platform->window.icon_width;
+    LK_U32 height = lk_platform->window.icon_height;
 
     BITMAPV5HEADER bitmap_header;
     ZeroMemory(&bitmap_header, sizeof(BITMAPV5HEADER));
@@ -1767,7 +1804,7 @@ static void lk_set_window_icon(HWND window, HDC dc)
     {
         for (LK_U32 y = 0; y < height; y++)
         {
-            LK_U32* read  = (LK_U32*) lk_platform.window.icon_pixels + y * width;
+            LK_U32* read  = (LK_U32*) lk_platform->window.icon_pixels + y * width;
             LK_U32* write = (LK_U32*) bitmap_data + (height - y - 1) * width;
 
             for (LK_U32 x = 0; x < width; x++)
@@ -1814,141 +1851,7 @@ static void lk_set_window_icon(HWND window, HDC dc)
     }
 }
 
-#if 0
-#define DIDFT_OPTIONAL      0x80000000
-
-static const LK_U8 LK_GUID_IDirectInput8A[16] = { 0x30,0x80,0x79,0xBF,0x3A,0x48,0xA2,0x4D,0xAA,0x99,0x5D,0x64,0xED,0x36,0x97,0x00 }; // BF798030-483A-4DA2-AA99-5D64ED369700
-static const LK_U8 LK_GUID_IDirectInput8W[16] = { 0x31,0x80,0x79,0xBF,0x3A,0x48,0xA2,0x4D,0xAA,0x99,0x5D,0x64,0xED,0x36,0x97,0x00 }; // BF798031-483A-4DA2-AA99-5D64ED369700
-static const LK_U8 LK_GUID_XAxis[16]          = { 0xE0,0x02,0x6D,0xA3,0xF3,0xC9,0xCF,0x11,0xBF,0xC7,0x44,0x45,0x53,0x54,0x00,0x00 };
-static const LK_U8 LK_GUID_YAxis[16]          = { 0xE1,0x02,0x6D,0xA3,0xF3,0xC9,0xCF,0x11,0xBF,0xC7,0x44,0x45,0x53,0x54,0x00,0x00 };
-static const LK_U8 LK_GUID_ZAxis[16]          = { 0xE2,0x02,0x6D,0xA3,0xF3,0xC9,0xCF,0x11,0xBF,0xC7,0x44,0x45,0x53,0x54,0x00,0x00 };
-static const LK_U8 LK_GUID_RxAxis[16]         = { 0xF4,0x02,0x6D,0xA3,0xF3,0xC9,0xCF,0x11,0xBF,0xC7,0x44,0x45,0x53,0x54,0x00,0x00 };
-static const LK_U8 LK_GUID_RyAxis[16]         = { 0xF5,0x02,0x6D,0xA3,0xF3,0xC9,0xCF,0x11,0xBF,0xC7,0x44,0x45,0x53,0x54,0x00,0x00 };
-static const LK_U8 LK_GUID_RzAxis[16]         = { 0xE3,0x02,0x6D,0xA3,0xF3,0xC9,0xCF,0x11,0xBF,0xC7,0x44,0x45,0x53,0x54,0x00,0x00 };
-static const LK_U8 LK_GUID_Slider[16]         = { 0xE4,0x02,0x6D,0xA3,0xF3,0xC9,0xCF,0x11,0xBF,0xC7,0x44,0x45,0x53,0x54,0x00,0x00 };
-static const LK_U8 LK_GUID_Button[16]         = { 0xF0,0x02,0x6D,0xA3,0xF3,0xC9,0xCF,0x11,0xBF,0xC7,0x44,0x45,0x53,0x54,0x00,0x00 };
-static const LK_U8 LK_GUID_Key[16]            = { 0x20,0x82,0x72,0x55,0x3C,0xD3,0xCF,0x11,0xBF,0xC7,0x44,0x45,0x53,0x54,0x00,0x00 };
-static const LK_U8 LK_GUID_POV[16]            = { 0xF2,0x02,0x6D,0xA3,0xF3,0xC9,0xCF,0x11,0xBF,0xC7,0x44,0x45,0x53,0x54,0x00,0x00 };
-
-static const DIOBJECTDATAFORMAT lk_joystick_data_format_array[] =
-{
-    { (GUID*) &LK_GUID_XAxis,  DIJOFS_X,         DIDFT_OPTIONAL | DIDFT_AXIS | DIDFT_ANYINSTANCE, 0},
-    { (GUID*) &LK_GUID_YAxis,  DIJOFS_Y,         DIDFT_OPTIONAL | DIDFT_AXIS | DIDFT_ANYINSTANCE, 0},
-    { (GUID*) &LK_GUID_ZAxis,  DIJOFS_Z,         DIDFT_OPTIONAL | DIDFT_AXIS | DIDFT_ANYINSTANCE, 0},
-    { (GUID*) &LK_GUID_RxAxis, DIJOFS_RX,        DIDFT_OPTIONAL | DIDFT_AXIS | DIDFT_ANYINSTANCE, 0},
-    { (GUID*) &LK_GUID_RyAxis, DIJOFS_RY,        DIDFT_OPTIONAL | DIDFT_AXIS | DIDFT_ANYINSTANCE, 0},
-    { (GUID*) &LK_GUID_RzAxis, DIJOFS_RZ,        DIDFT_OPTIONAL | DIDFT_AXIS | DIDFT_ANYINSTANCE, 0},
-    { (GUID*) &LK_GUID_Slider, DIJOFS_SLIDER(0), DIDFT_OPTIONAL | DIDFT_AXIS | DIDFT_ANYINSTANCE, 0},
-    { (GUID*) &LK_GUID_Slider, DIJOFS_SLIDER(1), DIDFT_OPTIONAL | DIDFT_AXIS | DIDFT_ANYINSTANCE, 0},
-    { (GUID*) &LK_GUID_POV,    DIJOFS_POV(0),    DIDFT_OPTIONAL | DIDFT_POV  | DIDFT_ANYINSTANCE, 0},
-    { (GUID*) &LK_GUID_POV,    DIJOFS_POV(1),    DIDFT_OPTIONAL | DIDFT_POV  | DIDFT_ANYINSTANCE, 0},
-    { (GUID*) &LK_GUID_POV,    DIJOFS_POV(2),    DIDFT_OPTIONAL | DIDFT_POV  | DIDFT_ANYINSTANCE, 0},
-    { (GUID*) &LK_GUID_POV,    DIJOFS_POV(3),    DIDFT_OPTIONAL | DIDFT_POV  | DIDFT_ANYINSTANCE, 0},
-    { NULL, DIJOFS_BUTTON(0),  DIDFT_OPTIONAL | DIDFT_BUTTON | DIDFT_ANYINSTANCE, 0},
-    { NULL, DIJOFS_BUTTON(1),  DIDFT_OPTIONAL | DIDFT_BUTTON | DIDFT_ANYINSTANCE, 0},
-    { NULL, DIJOFS_BUTTON(2),  DIDFT_OPTIONAL | DIDFT_BUTTON | DIDFT_ANYINSTANCE, 0},
-    { NULL, DIJOFS_BUTTON(3),  DIDFT_OPTIONAL | DIDFT_BUTTON | DIDFT_ANYINSTANCE, 0},
-    { NULL, DIJOFS_BUTTON(4),  DIDFT_OPTIONAL | DIDFT_BUTTON | DIDFT_ANYINSTANCE, 0},
-    { NULL, DIJOFS_BUTTON(5),  DIDFT_OPTIONAL | DIDFT_BUTTON | DIDFT_ANYINSTANCE, 0},
-    { NULL, DIJOFS_BUTTON(6),  DIDFT_OPTIONAL | DIDFT_BUTTON | DIDFT_ANYINSTANCE, 0},
-    { NULL, DIJOFS_BUTTON(7),  DIDFT_OPTIONAL | DIDFT_BUTTON | DIDFT_ANYINSTANCE, 0},
-    { NULL, DIJOFS_BUTTON(8),  DIDFT_OPTIONAL | DIDFT_BUTTON | DIDFT_ANYINSTANCE, 0},
-    { NULL, DIJOFS_BUTTON(9),  DIDFT_OPTIONAL | DIDFT_BUTTON | DIDFT_ANYINSTANCE, 0},
-    { NULL, DIJOFS_BUTTON(10), DIDFT_OPTIONAL | DIDFT_BUTTON | DIDFT_ANYINSTANCE, 0},
-    { NULL, DIJOFS_BUTTON(11), DIDFT_OPTIONAL | DIDFT_BUTTON | DIDFT_ANYINSTANCE, 0},
-    { NULL, DIJOFS_BUTTON(12), DIDFT_OPTIONAL | DIDFT_BUTTON | DIDFT_ANYINSTANCE, 0},
-    { NULL, DIJOFS_BUTTON(13), DIDFT_OPTIONAL | DIDFT_BUTTON | DIDFT_ANYINSTANCE, 0},
-    { NULL, DIJOFS_BUTTON(14), DIDFT_OPTIONAL | DIDFT_BUTTON | DIDFT_ANYINSTANCE, 0},
-    { NULL, DIJOFS_BUTTON(15), DIDFT_OPTIONAL | DIDFT_BUTTON | DIDFT_ANYINSTANCE, 0},
-    { NULL, DIJOFS_BUTTON(16), DIDFT_OPTIONAL | DIDFT_BUTTON | DIDFT_ANYINSTANCE, 0},
-    { NULL, DIJOFS_BUTTON(17), DIDFT_OPTIONAL | DIDFT_BUTTON | DIDFT_ANYINSTANCE, 0},
-    { NULL, DIJOFS_BUTTON(18), DIDFT_OPTIONAL | DIDFT_BUTTON | DIDFT_ANYINSTANCE, 0},
-    { NULL, DIJOFS_BUTTON(19), DIDFT_OPTIONAL | DIDFT_BUTTON | DIDFT_ANYINSTANCE, 0},
-    { NULL, DIJOFS_BUTTON(20), DIDFT_OPTIONAL | DIDFT_BUTTON | DIDFT_ANYINSTANCE, 0},
-    { NULL, DIJOFS_BUTTON(21), DIDFT_OPTIONAL | DIDFT_BUTTON | DIDFT_ANYINSTANCE, 0},
-    { NULL, DIJOFS_BUTTON(22), DIDFT_OPTIONAL | DIDFT_BUTTON | DIDFT_ANYINSTANCE, 0},
-    { NULL, DIJOFS_BUTTON(23), DIDFT_OPTIONAL | DIDFT_BUTTON | DIDFT_ANYINSTANCE, 0},
-    { NULL, DIJOFS_BUTTON(24), DIDFT_OPTIONAL | DIDFT_BUTTON | DIDFT_ANYINSTANCE, 0},
-    { NULL, DIJOFS_BUTTON(25), DIDFT_OPTIONAL | DIDFT_BUTTON | DIDFT_ANYINSTANCE, 0},
-    { NULL, DIJOFS_BUTTON(26), DIDFT_OPTIONAL | DIDFT_BUTTON | DIDFT_ANYINSTANCE, 0},
-    { NULL, DIJOFS_BUTTON(27), DIDFT_OPTIONAL | DIDFT_BUTTON | DIDFT_ANYINSTANCE, 0},
-    { NULL, DIJOFS_BUTTON(28), DIDFT_OPTIONAL | DIDFT_BUTTON | DIDFT_ANYINSTANCE, 0},
-    { NULL, DIJOFS_BUTTON(29), DIDFT_OPTIONAL | DIDFT_BUTTON | DIDFT_ANYINSTANCE, 0},
-    { NULL, DIJOFS_BUTTON(30), DIDFT_OPTIONAL | DIDFT_BUTTON | DIDFT_ANYINSTANCE, 0},
-    { NULL, DIJOFS_BUTTON(31), DIDFT_OPTIONAL | DIDFT_BUTTON | DIDFT_ANYINSTANCE, 0},
-};
-
-static const DIDATAFORMAT lk_joystick_data_format =
-{
-    sizeof(DIDATAFORMAT),
-    sizeof(DIOBJECTDATAFORMAT),
-    DIDF_ABSAXIS,
-    sizeof(DIJOYSTATE),
-    sizeof(lk_joystick_data_format_array) / sizeof(lk_joystick_data_format_array[0]),
-    (LPDIOBJECTDATAFORMAT) lk_joystick_data_format_array
-};
-
-static BOOL lk_directinput_enum_devices(LPCDIDEVICEINSTANCEA device, LPVOID userdata)
-{
-    IDirectInput8A* direct_input = lk_private.directinput.direct_input;
-
-    LPDIRECTINPUTDEVICE8 controller;
-    HRESULT create_success = direct_input->CreateDevice(device->guidInstance, &controller, NULL);
-    if (FAILED(create_success))
-        return DIENUM_CONTINUE;
-
-    HWND window = lk_private.window.handle;
-    HRESULT cooperate_success = controller->SetCooperativeLevel(window, DISCL_FOREGROUND | DISCL_NONEXCLUSIVE);
-    if (FAILED(cooperate_success))
-    {
-        LK_Log("Failed to set cooperative level for controller device.");
-    }
-
-    if (FAILED(controller->SetDataFormat(&lk_joystick_data_format)))
-    {
-        LK_Log("Failed to set the data format for controller device.");
-    }
-
-    // printf("found %s!\n", device->tszInstanceName);
-    return DIENUM_CONTINUE;
-}
-
-static int lk_load_directinput_library()
-{
-    HMODULE library = LoadLibraryA("dinput8.dll");
-    if (library == 0)
-    {
-        LK_Log("Failed to load DirectInput; couldn't load dinput8.dll.");
-        return 0;
-    }
-
-
-    HINSTANCE instance = GetModuleHandle(NULL);
-    HRESULT(*DirectInput8Create)(HINSTANCE hinst, DWORD dwVersion, IID* riidltf, LPVOID* ppvOut, LPUNKNOWN punkOuter);
-    LK_GetProc(library, DirectInput8Create, "DirectInput8Create");
-    if (!DirectInput8Create)
-    {
-        LK_Log("Failed to load DirectInput; couldn't find DirectInput8Create in dinput8.dll.");
-        return 0;
-    }
-
-    IDirectInput8A* direct_input;
-    if (FAILED(DirectInput8Create(instance, DIRECTINPUT_VERSION, (IID*) &LK_GUID_IDirectInput8A, (void**) &direct_input, NULL)))
-    {
-        LK_Log("Failed to load DirectInput; couldn't to create an IDirectInput8 instance.");
-        return 0;
-    }
-
-    lk_private.directinput.direct_input = direct_input;
-    direct_input->EnumDevices(DI8DEVCLASS_GAMECTRL, lk_directinput_enum_devices, NULL, DIEDFL_ATTACHEDONLY);
-
-    // printf("loaded!\n");
-
-    return 1;
-}
-#endif
-
-static int lk_load_opengl_library()
+static int lk_load_opengl_library(LK_Private* lk_private, LK_Platform* lk_platform)
 {
     HMODULE library = LoadLibraryA("opengl32.dll");
     if (library == 0)
@@ -1957,18 +1860,18 @@ static int lk_load_opengl_library()
         return 0;
     }
 
-    lk_private.opengl.library = library;
+    lk_private->opengl.library = library;
 
-    #define LK_GetOpenGLFunction(name)                      \
-    {                                                       \
-        LK_GetProc(library, lk_private.opengl.name, #name); \
-        if (!lk_private.opengl.name)                        \
-        {                                                   \
-            LK_Log("Failed to create an OpenGL context;"    \
-                  " couldn't find " #name "() in"           \
-                  " OpenGL32.dll.");                        \
-            return 0;                                       \
-        }                                                   \
+    #define LK_GetOpenGLFunction(name)                       \
+    {                                                        \
+        LK_GetProc(library, lk_private->opengl.name, #name); \
+        if (!lk_private->opengl.name)                        \
+        {                                                    \
+            LK_Log("Failed to create an OpenGL context;"     \
+                  " couldn't find " #name "() in"            \
+                  " OpenGL32.dll.");                         \
+            return 0;                                        \
+        }                                                    \
     }
 
     LK_GetOpenGLFunction(wglCreateContext );
@@ -1981,10 +1884,10 @@ static int lk_load_opengl_library()
     return 1;
 }
 
-static void lk_create_legacy_opengl_context(HINSTANCE instance)
+static void lk_create_legacy_opengl_context(LK_Private* lk_private, LK_Platform* lk_platform, HINSTANCE instance)
 {
-    HWND window = lk_private.window.handle;
-    HDC dc = lk_private.window.dc;
+    HWND window = lk_private->window.handle;
+    HDC dc = lk_private->window.dc;
 
     PIXELFORMATDESCRIPTOR pixel_format_desc;
     ZeroMemory(&pixel_format_desc, sizeof(PIXELFORMATDESCRIPTOR));
@@ -1992,9 +1895,9 @@ static void lk_create_legacy_opengl_context(HINSTANCE instance)
     pixel_format_desc.nVersion = 1;
     pixel_format_desc.dwFlags = PFD_DRAW_TO_WINDOW | PFD_SUPPORT_OPENGL | PFD_DOUBLEBUFFER;
     pixel_format_desc.iPixelType = PFD_TYPE_RGBA;
-    pixel_format_desc.cColorBits = lk_platform.opengl.color_bits;
-    pixel_format_desc.cDepthBits = lk_platform.opengl.depth_bits;
-    pixel_format_desc.cStencilBits = lk_platform.opengl.stencil_bits;
+    pixel_format_desc.cColorBits = lk_platform->opengl.color_bits;
+    pixel_format_desc.cDepthBits = lk_platform->opengl.depth_bits;
+    pixel_format_desc.cStencilBits = lk_platform->opengl.stencil_bits;
     pixel_format_desc.iLayerType = PFD_MAIN_PLANE;
 
     int pixel_format = ChoosePixelFormat(dc, &pixel_format_desc);
@@ -2010,7 +1913,7 @@ static void lk_create_legacy_opengl_context(HINSTANCE instance)
         return;
     }
 
-    HGLRC context = lk_private.opengl.wglCreateContext(dc);
+    HGLRC context = lk_private->opengl.wglCreateContext(dc);
 
     if (!context)
     {
@@ -2018,17 +1921,17 @@ static void lk_create_legacy_opengl_context(HINSTANCE instance)
         return;
     }
 
-    if (!lk_private.opengl.wglMakeCurrent(dc, context))
+    if (!lk_private->opengl.wglMakeCurrent(dc, context))
     {
         LK_Log("Failed to create a legacy OpenGL context; wglMakeCurrent() failed.");
-        lk_private.opengl.wglDeleteContext(context);
+        lk_private->opengl.wglDeleteContext(context);
         return;
     }
 
-    lk_private.opengl.context = context;
+    lk_private->opengl.context = context;
 }
 
-static int lk_create_modern_opengl_context(HINSTANCE instance)
+static int lk_create_modern_opengl_context(LK_Private* lk_private, LK_Platform* lk_platform, HINSTANCE instance)
 {
     HWND fake_window;
     HDC fake_dc;
@@ -2037,7 +1940,7 @@ static int lk_create_modern_opengl_context(HINSTANCE instance)
     HGLRC fake_context;
     HGLRC real_context;
 
-    fake_window = CreateWindowExW(0, LK_WINDOW_CLASS_NAME, L"fake window", 0, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, 0, 0, instance, 0);
+    fake_window = CreateWindowExW(0, lk_private->window.class_name, L"fake window", 0, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, 0, 0, instance, 0);
     if (!fake_window)
     {
         LK_Log("Failed to create a modern OpenGL context; CreateWindowEx() failed.");
@@ -2073,7 +1976,7 @@ static int lk_create_modern_opengl_context(HINSTANCE instance)
         goto undo_fake_dc;
     }
 
-    fake_context = lk_private.opengl.wglCreateContext(fake_dc);
+    fake_context = lk_private->opengl.wglCreateContext(fake_dc);
 
     if (!fake_context)
     {
@@ -2081,7 +1984,7 @@ static int lk_create_modern_opengl_context(HINSTANCE instance)
         goto undo_fake_dc;
     }
 
-    if (!lk_private.opengl.wglMakeCurrent(fake_dc, fake_context))
+    if (!lk_private->opengl.wglMakeCurrent(fake_dc, fake_context))
     {
         LK_Log("Failed to create a modern OpenGL context; wglMakeCurrent() failed.");
         goto undo_fake_context;
@@ -2090,11 +1993,11 @@ static int lk_create_modern_opengl_context(HINSTANCE instance)
 
     #define LK_GetWGLFunction(name)                                                                        \
     {                                                                                                      \
-        PROC proc = lk_private.opengl.wglGetProcAddress(#name);                                            \
+        PROC proc = lk_private->opengl.wglGetProcAddress(#name);                                           \
         if (proc && (proc != (PROC) 1) && (proc != (PROC) 2) && (proc != (PROC) 3) && (proc != (PROC) -1)) \
-            *(PROC*) &lk_private.opengl.name = proc;                                                       \
+            *(PROC*) &lk_private->opengl.name = proc;                                                      \
         else                                                                                               \
-            lk_private.opengl.name = 0;                                                                    \
+            lk_private->opengl.name = 0;                                                                   \
     }
 
     LK_GetWGLFunction(wglChoosePixelFormatARB)
@@ -2104,10 +2007,10 @@ static int lk_create_modern_opengl_context(HINSTANCE instance)
     #undef LK_GetWGLFunction
 
 
-    if (lk_private.opengl.wglChoosePixelFormatARB && lk_private.opengl.wglCreateContextAttribsARB)
+    if (lk_private->opengl.wglChoosePixelFormatARB && lk_private->opengl.wglCreateContextAttribsARB)
     {
-        HWND window = lk_private.window.handle;
-        HDC dc = lk_private.window.dc;
+        HWND window = lk_private->window.handle;
+        HDC dc = lk_private->window.dc;
 
         const int WGL_DRAW_TO_WINDOW_ARB    = 0x2001;
         const int WGL_ACCELERATION_ARB      = 0x2003;
@@ -2138,20 +2041,20 @@ static int lk_create_modern_opengl_context(HINSTANCE instance)
         LK_AddPixelFormatAttributes(WGL_DOUBLE_BUFFER_ARB, 1);
         LK_AddPixelFormatAttributes(WGL_PIXEL_TYPE_ARB, WGL_TYPE_RGBA_ARB);
         LK_AddPixelFormatAttributes(WGL_ACCELERATION_ARB, WGL_FULL_ACCELERATION_ARB);
-        LK_AddPixelFormatAttributes(WGL_COLOR_BITS_ARB, (int) lk_platform.opengl.color_bits);
-        LK_AddPixelFormatAttributes(WGL_DEPTH_BITS_ARB, (int) lk_platform.opengl.depth_bits);
-        LK_AddPixelFormatAttributes(WGL_STENCIL_BITS_ARB, (int) lk_platform.opengl.stencil_bits);
+        LK_AddPixelFormatAttributes(WGL_COLOR_BITS_ARB, (int) lk_platform->opengl.color_bits);
+        LK_AddPixelFormatAttributes(WGL_DEPTH_BITS_ARB, (int) lk_platform->opengl.depth_bits);
+        LK_AddPixelFormatAttributes(WGL_STENCIL_BITS_ARB, (int) lk_platform->opengl.stencil_bits);
 
-        if (lk_platform.window.transparent)
+        if (lk_platform->window.transparent)
         {
             LK_AddPixelFormatAttributes(WGL_TRANSPARENT_ARB, TRUE);
             LK_AddPixelFormatAttributes(WGL_ALPHA_BITS_ARB, 8);
         }
 
-        if (lk_platform.opengl.sample_count > 1)
+        if (lk_platform->opengl.sample_count > 1)
         {
             LK_AddPixelFormatAttributes(WGL_SAMPLE_BUFFERS_ARB, 1);
-            LK_AddPixelFormatAttributes(WGL_SAMPLES_ARB, (int) lk_platform.opengl.sample_count);
+            LK_AddPixelFormatAttributes(WGL_SAMPLES_ARB, (int) lk_platform->opengl.sample_count);
         }
 
         #undef LK_AddPixelFormatAttributes
@@ -2159,7 +2062,7 @@ static int lk_create_modern_opengl_context(HINSTANCE instance)
 
         int pixel_format;
         UINT pixel_format_count;
-        if (!lk_private.opengl.wglChoosePixelFormatARB(dc, pixel_format_attributes, 0, 1, &pixel_format, &pixel_format_count))
+        if (!lk_private->opengl.wglChoosePixelFormatARB(dc, pixel_format_attributes, 0, 1, &pixel_format, &pixel_format_count))
         {
             LK_Log("Failed to create a modern OpenGL context; wglChoosePixelFormatARB() failed.");
             goto undo_fake_context;
@@ -2196,39 +2099,39 @@ static int lk_create_modern_opengl_context(HINSTANCE instance)
         const int WGL_CONTEXT_COMPATIBILITY_PROFILE_BIT_ARB = 0x00000002;
 
         int flags = WGL_CONTEXT_FORWARD_COMPATIBLE_BIT_ARB;
-        if (lk_platform.opengl.debug_context)
+        if (lk_platform->opengl.debug_context)
         {
             flags |= WGL_CONTEXT_DEBUG_BIT_ARB;
         }
 
         int profile = WGL_CONTEXT_CORE_PROFILE_BIT_ARB;
-        if (lk_platform.opengl.compatibility_context)
+        if (lk_platform->opengl.compatibility_context)
         {
             profile = WGL_CONTEXT_COMPATIBILITY_PROFILE_BIT_ARB;
         }
 
-        if (!lk_platform.opengl.major_version)
+        if (!lk_platform->opengl.major_version)
         {
-            lk_platform.opengl.major_version = 3;
-            lk_platform.opengl.minor_version = 3;
+            lk_platform->opengl.major_version = 3;
+            lk_platform->opengl.minor_version = 3;
         }
 
         int attributes[] =
         {
-            WGL_CONTEXT_MAJOR_VERSION_ARB, (int) lk_platform.opengl.major_version,
-            WGL_CONTEXT_MINOR_VERSION_ARB, (int) lk_platform.opengl.minor_version,
+            WGL_CONTEXT_MAJOR_VERSION_ARB, (int) lk_platform->opengl.major_version,
+            WGL_CONTEXT_MINOR_VERSION_ARB, (int) lk_platform->opengl.minor_version,
             WGL_CONTEXT_FLAGS_ARB, flags,
             WGL_CONTEXT_PROFILE_MASK_ARB, profile,
             0
         };
 
-        if (lk_platform.opengl.major_version < 3)
+        if (lk_platform->opengl.major_version < 3)
         {
             // Don't set the profile or flags for legacy OpenGL.
             attributes[4] = 0;
         }
 
-        real_context = lk_private.opengl.wglCreateContextAttribsARB(dc, 0, attributes);
+        real_context = lk_private->opengl.wglCreateContextAttribsARB(dc, 0, attributes);
 
         if (!real_context)
         {
@@ -2236,18 +2139,18 @@ static int lk_create_modern_opengl_context(HINSTANCE instance)
             goto undo_fake_context;
         }
 
-        lk_private.opengl.wglMakeCurrent(0, 0);
-        lk_private.opengl.wglDeleteContext(fake_context);
+        lk_private->opengl.wglMakeCurrent(0, 0);
+        lk_private->opengl.wglDeleteContext(fake_context);
         ReleaseDC(fake_window, fake_dc);
         DestroyWindow(fake_window);
 
-        if (!lk_private.opengl.wglMakeCurrent(dc, real_context))
+        if (!lk_private->opengl.wglMakeCurrent(dc, real_context))
         {
             LK_Log("Failed to create a modern OpenGL context; wglMakeCurrent() failed.");
             goto undo_real_context;
         }
 
-        lk_private.opengl.context = real_context;
+        lk_private->opengl.context = real_context;
         return 1; // success!
     }
     else
@@ -2257,10 +2160,10 @@ static int lk_create_modern_opengl_context(HINSTANCE instance)
 
 
 undo_real_context:
-    lk_private.opengl.wglDeleteContext(real_context);
+    lk_private->opengl.wglDeleteContext(real_context);
 undo_fake_context:
-    lk_private.opengl.wglMakeCurrent(0, 0);
-    lk_private.opengl.wglDeleteContext(fake_context);
+    lk_private->opengl.wglMakeCurrent(0, 0);
+    lk_private->opengl.wglDeleteContext(fake_context);
 undo_fake_dc:
     ReleaseDC(fake_window, fake_dc);
 undo_fake_window:
@@ -2268,28 +2171,39 @@ undo_fake_window:
     return 0;
 }
 
-static void lk_open_window()
+static void lk_open_window(LK_Private* lk_private, LK_Platform* lk_platform)
 {
     WNDCLASSEXW window_class;
     ZeroMemory(&window_class, sizeof(WNDCLASSEXW));
 
     HINSTANCE instance = GetModuleHandle(0);
 
-    window_class.cbSize = sizeof(WNDCLASSEXW);
-    window_class.style = CS_OWNDC | CS_HREDRAW | CS_VREDRAW;
-    window_class.lpfnWndProc = lk_window_callback;
-    window_class.hInstance = instance;
-    window_class.lpszClassName = LK_WINDOW_CLASS_NAME;
-
-    if (!RegisterClassExW(&window_class))
+    int counter = 0;
+    while (1)
     {
-        LK_Log("Failed to open a window; RegisterClassEx() failed.");
-        return;
+        wsprintfW(lk_private->window.class_name, L"lk_platform_class_%d", lk_private, counter);
+
+        window_class.cbSize = sizeof(WNDCLASSEXW);
+        window_class.style = CS_OWNDC | CS_HREDRAW | CS_VREDRAW;
+        window_class.lpfnWndProc = lk_window_callback;
+        window_class.hInstance = instance;
+        window_class.lpszClassName = lk_private->window.class_name;
+
+        if (!RegisterClassExW(&window_class))
+        {
+            if (GetLastError() == ERROR_CLASS_ALREADY_EXISTS)
+                continue;
+
+            LK_Log("Failed to open a window; RegisterClassEx() failed.");
+            return;
+        }
+
+        break;
     }
 
-    lk_fill_default_window_settings(instance);
+    lk_fill_default_window_settings(lk_private, lk_platform, instance);
 
-    HWND window_handle = CreateWindowExW(0, LK_WINDOW_CLASS_NAME, L"", 0,
+    HWND window_handle = CreateWindowExW(0, lk_private->window.class_name, L"", 0,
                                          CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT,
                                          0, 0, instance, 0);
 
@@ -2300,26 +2214,28 @@ static void lk_open_window()
     }
 
 
+    SetWindowLongPtrA(window_handle, GWLP_USERDATA, (LONG_PTR) lk_private);
+
+
     HMODULE dwmapi = LoadLibraryA("dwmapi.dll");
     if (dwmapi)
     {
-        if (lk_platform.window.disable_animations)
+        if (lk_platform->window.disable_animations)
         {
-            lk_disable_window_animations(dwmapi, window_handle);
+            lk_disable_window_animations(lk_private, lk_platform, dwmapi, window_handle);
         }
 
-        if (lk_platform.window.transparent)
+        if (lk_platform->window.transparent)
         {
-            lk_enable_window_transparency(dwmapi, window_handle);
+            lk_enable_window_transparency(lk_private, lk_platform, dwmapi, window_handle);
         }
 
         FreeLibrary(dwmapi);
     }
 
-
-    lk_platform.window.handle = window_handle;
-    lk_private.window.handle = window_handle;
-    lk_push();
+    lk_platform->window.handle = window_handle;
+    lk_private->window.handle = window_handle;
+    lk_push(lk_private, lk_platform);
 
     SetForegroundWindow(window_handle);
     SetFocus(window_handle);
@@ -2333,7 +2249,7 @@ static void lk_open_window()
 
 
     HDC dc = GetDC(window_handle);
-    lk_private.window.dc = dc;
+    lk_private->window.dc = dc;
 
     if (!dc)
     {
@@ -2342,20 +2258,20 @@ static void lk_open_window()
     }
 
 
-    if (lk_platform.window.icon_pixels)
+    if (lk_platform->window.icon_pixels)
     {
-        lk_set_window_icon(window_handle, dc);
+        lk_set_window_icon(lk_private, lk_platform, window_handle, dc);
     }
 
 
-    LK_B32 use_opengl = (lk_private.window.backend == LK_WINDOW_OPENGL);
+    LK_B32 use_opengl = (lk_private->window.backend == LK_WINDOW_OPENGL);
     if (use_opengl)
     {
-        if (lk_load_opengl_library())
+        if (lk_load_opengl_library(lk_private, lk_platform))
         {
-            if (!lk_create_modern_opengl_context(instance))
+            if (!lk_create_modern_opengl_context(lk_private, lk_platform, instance))
             {
-                lk_create_legacy_opengl_context(instance);
+                lk_create_legacy_opengl_context(lk_private, lk_platform, instance);
             }
         }
     }
@@ -2388,9 +2304,9 @@ static void lk_open_window()
     lk_load_directinput_library();
 #endif
 
-    lk_pull();
-    lk_update_canvas();
-    lk_update_swap_interval();
+    lk_pull(lk_private, lk_platform);
+    lk_update_canvas(lk_private, lk_platform);
+    lk_update_swap_interval(lk_private, lk_platform);
 
 #if 0
     UINT count_raw_devices = 0;
@@ -2462,17 +2378,17 @@ static void lk_open_window()
     }
 }
 
-static void lk_close_window()
+static void lk_close_window(LK_Private* lk_private, LK_Platform* lk_platform)
 {
     HINSTANCE instance = GetModuleHandle(0);
-    HWND window = lk_private.window.handle;
-    HDC dc = lk_private.window.dc;
-    HGLRC context = lk_private.opengl.context;
+    HWND window = lk_private->window.handle;
+    HDC dc = lk_private->window.dc;
+    HGLRC context = lk_private->opengl.context;
 
     if (context)
     {
-        lk_private.opengl.wglMakeCurrent(0, 0);
-        lk_private.opengl.wglDeleteContext(context);
+        lk_private->opengl.wglMakeCurrent(0, 0);
+        lk_private->opengl.wglDeleteContext(context);
     }
 
     if (dc)
@@ -2485,16 +2401,17 @@ static void lk_close_window()
         DestroyWindow(window);
     }
 
-    UnregisterClassW(LK_WINDOW_CLASS_NAME, instance);
+    UnregisterClassW(lk_private->window.class_name, instance);
 
-    lk_private.window.handle = 0;
-    lk_private.window.dc = 0;
-    lk_private.opengl.context = 0;
+    lk_private->window.handle = 0;
+    lk_private->window.dc = 0;
+    lk_private->opengl.context = 0;
 }
 
-static void CALLBACK lk_message_fiber_proc(void* unused)
+static void CALLBACK lk_message_fiber_proc(void* lk_private_ptr)
 {
-    HANDLE main_fiber = lk_private.window.main_fiber;
+    LK_Private* lk_private = (LK_Private*) lk_private_ptr;
+    HANDLE main_fiber = lk_private->window.main_fiber;
 
     while (1)
     {
@@ -2509,94 +2426,94 @@ static void CALLBACK lk_message_fiber_proc(void* unused)
     }
 }
 
-static void lk_window_message_loop()
+static void lk_window_message_loop(LK_Private* lk_private)
 {
-    HWND window = lk_private.window.handle;
+    HWND window = lk_private->window.handle;
     if (!window)
     {
         return;
     }
 
-    HANDLE message_fiber = lk_private.window.message_fiber;
+    HANDLE message_fiber = lk_private->window.message_fiber;
     SwitchToFiber(message_fiber);
 }
 
-static void lk_window_swap_buffers()
+static void lk_window_swap_buffers(LK_Private* lk_private, LK_Platform* lk_platform)
 {
-    HDC dc = lk_private.window.dc;
+    HDC dc = lk_private->window.dc;
     if (!dc)
     {
         return;
     }
 
-    if (lk_private.window.backend == LK_WINDOW_CANVAS)
+    if (lk_private->window.backend == LK_WINDOW_CANVAS)
     {
-        LK_U32 width = lk_platform.window.width;
-        LK_U32 height = lk_platform.window.height;
-        lk_repaint_canvas_rectangle(dc, 0, 0, width, height);
+        LK_U32 width = lk_platform->window.width;
+        LK_U32 height = lk_platform->window.height;
+        lk_repaint_canvas_rectangle(lk_private, lk_platform, dc, 0, 0, width, height);
     }
 
     SwapBuffers(dc);
 }
 
-static void lk_initialize_timer()
+static void lk_initialize_timer(LK_Private* lk_private)
 {
     LARGE_INTEGER i64;
     QueryPerformanceFrequency(&i64);
-    lk_private.time.ticks_per_second = i64.QuadPart;
+    lk_private->time.ticks_per_second = i64.QuadPart;
 
     QueryPerformanceCounter(&i64);
-    lk_private.time.initial_ticks = i64.QuadPart;
+    lk_private->time.initial_ticks = i64.QuadPart;
 }
 
-static void lk_update_time_stamp()
+static void lk_update_time_stamp(LK_Private* lk_private, LK_Platform* lk_platform)
 {
     LARGE_INTEGER i64;
     QueryPerformanceCounter(&i64);
 
-    LK_U64 frequency = lk_private.time.ticks_per_second;
-    LK_U64 new_ticks = i64.QuadPart - lk_private.time.initial_ticks;
-    LK_U64 delta_ticks = new_ticks - lk_platform.time.ticks;
+    LK_U64 frequency = lk_private->time.ticks_per_second;
+    LK_U64 new_ticks = i64.QuadPart - lk_private->time.initial_ticks;
+    LK_U64 delta_ticks = new_ticks - lk_platform->time.ticks;
 
-    lk_platform.time.delta_ticks = delta_ticks;
+    lk_platform->time.delta_ticks = delta_ticks;
 
-    LK_U64 nanoseconds_ticks = 1000000000 * delta_ticks + lk_private.time.unprocessed_nanoseconds;
-    lk_platform.time.delta_nanoseconds = nanoseconds_ticks / frequency;
-    lk_private.time.unprocessed_nanoseconds = nanoseconds_ticks % frequency;
+    LK_U64 nanoseconds_ticks = 1000000000 * delta_ticks + lk_private->time.unprocessed_nanoseconds;
+    lk_platform->time.delta_nanoseconds = nanoseconds_ticks / frequency;
+    lk_private->time.unprocessed_nanoseconds = nanoseconds_ticks % frequency;
 
-    LK_U64 microseconds_ticks = 1000000 * delta_ticks + lk_private.time.unprocessed_microseconds;
-    lk_platform.time.delta_microseconds = microseconds_ticks / frequency;
-    lk_private.time.unprocessed_microseconds = microseconds_ticks % frequency;
+    LK_U64 microseconds_ticks = 1000000 * delta_ticks + lk_private->time.unprocessed_microseconds;
+    lk_platform->time.delta_microseconds = microseconds_ticks / frequency;
+    lk_private->time.unprocessed_microseconds = microseconds_ticks % frequency;
 
-    LK_U64 milliseconds_ticks = 1000 * delta_ticks + lk_private.time.unprocessed_milliseconds;
-    lk_platform.time.delta_milliseconds = milliseconds_ticks / frequency;
-    lk_private.time.unprocessed_milliseconds = milliseconds_ticks % frequency;
+    LK_U64 milliseconds_ticks = 1000 * delta_ticks + lk_private->time.unprocessed_milliseconds;
+    lk_platform->time.delta_milliseconds = milliseconds_ticks / frequency;
+    lk_private->time.unprocessed_milliseconds = milliseconds_ticks % frequency;
 
-    lk_platform.time.delta_seconds = (LK_F64) delta_ticks / (LK_F64) frequency;
+    lk_platform->time.delta_seconds = (LK_F64) delta_ticks / (LK_F64) frequency;
 
-    lk_platform.time.ticks        += delta_ticks;
-    lk_platform.time.nanoseconds  += lk_platform.time.delta_nanoseconds;
-    lk_platform.time.microseconds += lk_platform.time.delta_microseconds;
-    lk_platform.time.milliseconds += lk_platform.time.delta_milliseconds;
-    lk_platform.time.seconds      += lk_platform.time.delta_seconds;
+    lk_platform->time.ticks        += delta_ticks;
+    lk_platform->time.nanoseconds  += lk_platform->time.delta_nanoseconds;
+    lk_platform->time.microseconds += lk_platform->time.delta_microseconds;
+    lk_platform->time.milliseconds += lk_platform->time.delta_milliseconds;
+    lk_platform->time.seconds      += lk_platform->time.delta_seconds;
 }
 
-static void lk_mixer_synchronize()
+static void lk_mixer_synchronize(LK_Private* lk_private, LK_Platform* lk_platform)
 {
-    if (lk_platform.audio.strategy != LK_AUDIO_MIXER)
+    if (lk_platform->audio.strategy != LK_AUDIO_MIXER)
     {
         return;
     }
 
-    LK_F64 playing_frequency = (LK_F64) lk_platform.audio.frequency;
+    LK_F64 playing_frequency = (LK_F64) lk_platform->audio.frequency;
 
-    HANDLE mutex = lk_private.audio.mixer_mutex;
+    HANDLE mutex = lk_private->audio.mixer_mutex;
     WaitForSingleObject(mutex, INFINITE);
     {
         for (int sound_index = 0; sound_index < LK_MIXER_SLOT_COUNT; sound_index++)
         {
-            LK_Sound* user = lk_platform.audio.mixer_slots + sound_index;
-            LK_Playing_Sound* live = lk_private.audio.mixer_slots + sound_index;
+            LK_Sound* user = lk_platform->audio.mixer_slots + sound_index;
+            LK_Playing_Sound* live = lk_private->audio.mixer_slots + sound_index;
 
             LK_B32 playing = user->playing;
             switch (live->state)
@@ -2641,15 +2558,16 @@ static void lk_mixer_synchronize()
     ReleaseMutex(mutex);
 }
 
-static void lk_mix(LK_Platform* unused, LK_S16* output)
+static void lk_mix(LK_Platform* lk_platform, LK_S16* output)
 {
-    HANDLE mutex = lk_private.audio.mixer_mutex;
+    LK_Private* lk_private = (LK_Private*) lk_platform->private_pointer;
+    HANDLE mutex = lk_private->audio.mixer_mutex;
     WaitForSingleObject(mutex, INFINITE);
 
 
-    LK_U32 output_channels = lk_platform.audio.channels;
-    LK_U32 output_count = lk_platform.audio.sample_count;
-    LK_Playing_Sound* slots = lk_private.audio.mixer_slots;
+    LK_U32 output_channels = lk_platform->audio.channels;
+    LK_U32 output_count = lk_platform->audio.sample_count;
+    LK_Playing_Sound* slots = lk_private->audio.mixer_slots;
 
     LK_S32 sound_count;
     LK_F32 samples_sum[8];
@@ -2723,14 +2641,16 @@ static void lk_mix(LK_Platform* unused, LK_S16* output)
     ReleaseMutex(mutex);
 }
 
-static DWORD CALLBACK lk_audio_thread(LPVOID parameter)
+static DWORD CALLBACK lk_audio_thread(LPVOID lk_private_ptr)
 {
-    LPDIRECTSOUNDBUFFER secondary_buffer = lk_private.audio.secondary_buffer;
+    LK_Private* lk_private = (LK_Private*) lk_private_ptr;
+    LK_Platform* lk_platform = lk_private->platform;
+    LPDIRECTSOUNDBUFFER secondary_buffer = lk_private->audio.secondary_buffer;
 
-    LK_Audio_Strategy strategy = lk_platform.audio.strategy;
-    LK_U32 channels = lk_platform.audio.channels;
-    LK_U32 sample_buffer_size = lk_private.audio.sample_buffer_size;
-    LK_U32 sample_buffer_count = lk_private.audio.sample_buffer_count;
+    LK_Audio_Strategy strategy = lk_platform->audio.strategy;
+    LK_U32 channels = lk_platform->audio.channels;
+    LK_U32 sample_buffer_size = lk_private->audio.sample_buffer_size;
+    LK_U32 sample_buffer_count = lk_private->audio.sample_buffer_count;
 
     int playing = 0;
 
@@ -2771,11 +2691,11 @@ static DWORD CALLBACK lk_audio_thread(LPVOID parameter)
         {
             if (strategy == LK_AUDIO_CALLBACK)
             {
-                lk_private.client.audio(&lk_platform, buffer);
+                lk_private->client.audio(lk_platform, buffer);
             }
             else
             {
-                lk_mix(&lk_platform, buffer);
+                lk_mix(lk_platform, buffer);
             }
 
             IDirectSoundBuffer_Unlock(secondary_buffer, buffer, buffer_size, 0, 0);
@@ -2793,12 +2713,12 @@ static DWORD CALLBACK lk_audio_thread(LPVOID parameter)
     }
 }
 
-static void lk_initialize_audio()
+static void lk_initialize_audio(LK_Private* lk_private, LK_Platform* lk_platform)
 {
-    if (lk_platform.window.no_window)
+    if (lk_platform->window.no_window)
     {
         LK_Log("The audio system requires an open window, but the client specified 'no_window'. The client won't get audio.");
-        lk_platform.audio.strategy = LK_NO_AUDIO;
+        lk_platform->audio.strategy = LK_NO_AUDIO;
         return;
     }
 
@@ -2807,7 +2727,7 @@ static void lk_initialize_audio()
     if (!dsound)
     {
         LK_Log("Failed to initialize audio; couldn't load dsound.dll.");
-        lk_platform.audio.strategy = LK_NO_AUDIO;
+        lk_platform->audio.strategy = LK_NO_AUDIO;
         return;
     }
 
@@ -2816,7 +2736,7 @@ static void lk_initialize_audio()
     if (!DirectSoundCreate)
     {
         LK_Log("Failed to initialize audio; couldn't find DirectSoundCreate() in dsound.dll.");
-        lk_platform.audio.strategy = LK_NO_AUDIO;
+        lk_platform->audio.strategy = LK_NO_AUDIO;
         return;
     }
 
@@ -2824,42 +2744,42 @@ static void lk_initialize_audio()
     if (!SUCCEEDED(DirectSoundCreate(0, &direct_sound, 0)))
     {
         LK_Log("Failed to initialize audio; DirectSoundCreate() failed.");
-        lk_platform.audio.strategy = LK_NO_AUDIO;
+        lk_platform->audio.strategy = LK_NO_AUDIO;
         return;
     }
 
-    HWND window = lk_private.window.handle;
+    HWND window = lk_private->window.handle;
     if (!SUCCEEDED(IDirectSound_SetCooperativeLevel(direct_sound, window, DSSCL_PRIORITY)))
     {
         LK_Log("Failed to initialize audio; DirectSound.SetCooperativeLevel() failed.");
-        lk_platform.audio.strategy = LK_NO_AUDIO;
+        lk_platform->audio.strategy = LK_NO_AUDIO;
         return;
     }
 
 
-    LK_U32 frequency = lk_platform.audio.frequency;
+    LK_U32 frequency = lk_platform->audio.frequency;
     if (!frequency)
     {
         frequency = 44100;
-        lk_platform.audio.frequency = frequency;
+        lk_platform->audio.frequency = frequency;
     }
 
-    LK_U32 channels = lk_platform.audio.channels;
+    LK_U32 channels = lk_platform->audio.channels;
     if (!channels)
     {
         channels = 2;
-        lk_platform.audio.channels = channels;
+        lk_platform->audio.channels = channels;
     }
 
-    LK_U32 sample_count = lk_platform.audio.sample_count;
+    LK_U32 sample_count = lk_platform->audio.sample_count;
     if (!sample_count)
     {
         sample_count = 2048;
-        lk_platform.audio.sample_count = sample_count;
+        lk_platform->audio.sample_count = sample_count;
     }
 
     LK_U32 sample_buffer_size = sample_count * channels * 2;
-    lk_private.audio.sample_buffer_size = sample_buffer_size;
+    lk_private->audio.sample_buffer_size = sample_buffer_size;
 
 
     WAVEFORMATEX format;
@@ -2882,14 +2802,14 @@ static void lk_initialize_audio()
         if (!SUCCEEDED(IDirectSound_CreateSoundBuffer(direct_sound, &description, &primary_buffer, 0)))
         {
             LK_Log("Failed to initialize audio; DirectSound.CreateSoundBuffer() failed for the primary buffer.");
-            lk_platform.audio.strategy = LK_NO_AUDIO;
+            lk_platform->audio.strategy = LK_NO_AUDIO;
             return;
         }
 
         if (!SUCCEEDED(IDirectSoundBuffer_SetFormat(primary_buffer, &format)))
         {
             LK_Log("Failed to initialize audio; DirectSound.SetFormat() failed for the primary buffer.");
-            lk_platform.audio.strategy = LK_NO_AUDIO;
+            lk_platform->audio.strategy = LK_NO_AUDIO;
             return;
         }
     }
@@ -2898,22 +2818,22 @@ static void lk_initialize_audio()
     {
         LK_U32 bytes_per_second = frequency * channels * 2;
         LK_U32 sample_buffer_count = (bytes_per_second + sample_buffer_size - 1) / sample_buffer_size;
-        lk_private.audio.sample_buffer_count = sample_buffer_count;
+        lk_private->audio.sample_buffer_count = sample_buffer_count;
 
         LK_U32 secondary_buffer_size = sample_buffer_count * sample_buffer_size;
-        lk_private.audio.secondary_buffer_size = secondary_buffer_size;
+        lk_private->audio.secondary_buffer_size = secondary_buffer_size;
 
         DSBUFFERDESC description;
         ZeroMemory(&description, sizeof(description));
         description.dwSize = sizeof(description);
-        description.dwFlags = lk_platform.audio.silent_when_not_focused ? 0 : DSBCAPS_GLOBALFOCUS;
+        description.dwFlags = lk_platform->audio.silent_when_not_focused ? 0 : DSBCAPS_GLOBALFOCUS;
         description.dwBufferBytes = secondary_buffer_size;
         description.lpwfxFormat = &format;
 
         if (!SUCCEEDED(IDirectSound_CreateSoundBuffer(direct_sound, &description, &secondary_buffer, 0)))
         {
             LK_Log("Failed to initialize audio; DirectSound.CreateSoundBuffer() failed for the secondary buffer.");
-            lk_platform.audio.strategy = LK_NO_AUDIO;
+            lk_platform->audio.strategy = LK_NO_AUDIO;
             return;
         }
 
@@ -2938,25 +2858,25 @@ static void lk_initialize_audio()
         }
     }
 
-    lk_private.audio.secondary_buffer = secondary_buffer;
+    lk_private->audio.secondary_buffer = secondary_buffer;
 
-    if (lk_platform.audio.strategy == LK_AUDIO_MIXER)
+    if (lk_platform->audio.strategy == LK_AUDIO_MIXER)
     {
         HANDLE mutex = CreateMutex(0, 0, 0);
-        lk_private.audio.mixer_mutex = mutex;
+        lk_private->audio.mixer_mutex = mutex;
 
         if (!mutex)
         {
             LK_Log("Failed to initialize the audio mixer; couldn't create a mutex object.");
-            lk_platform.audio.strategy = LK_NO_AUDIO;
+            lk_platform->audio.strategy = LK_NO_AUDIO;
             return;
         }
     }
 
-    CreateThread(0, 0, lk_audio_thread, 0, 0, 0);
+    CreateThread(0, 0, lk_audio_thread, lk_private, 0, 0);
 }
 
-static void lk_fill_system_info()
+static void lk_fill_system_info(LK_Private* lk_private, LK_Platform* lk_platform)
 {
     // @Incomplete - On x86, check if we have cpuid at all.
 
@@ -3003,13 +2923,13 @@ static void lk_fill_system_info()
     // get vendor string
     //
 
-    static char vendor[13];
+    char vendor[13];
     *(LK_U32*) &vendor[0] = id0[1];
     *(LK_U32*) &vendor[4] = id0[3];
     *(LK_U32*) &vendor[8] = id0[2];
     vendor[12] = 0;
 
-    lk_platform.system.vendor = vendor;
+    lk_platform->system.vendor = vendor;
 
     //
     // get core/logical count
@@ -3017,7 +2937,7 @@ static void lk_fill_system_info()
 
     SYSTEM_INFO system_info;
     GetSystemInfo(&system_info);
-    lk_platform.system.logical_count = system_info.dwNumberOfProcessors;
+    lk_platform->system.logical_count = system_info.dwNumberOfProcessors;
 
     //
     // get cache size
@@ -3025,7 +2945,7 @@ static void lk_fill_system_info()
 
     if (max_function >= 1)
     {
-        lk_platform.system.cache_line_size = ((id1[1] >> 8) & 0xFF) * 8;
+        lk_platform->system.cache_line_size = ((id1[1] >> 8) & 0xFF) * 8;
     }
 
     //
@@ -3034,23 +2954,23 @@ static void lk_fill_system_info()
 
     if (max_function >= 1)
     {
-        lk_platform.system.has_rdtsc = (id1[3] & 0x00000010u) ? 1 : 0;
-        lk_platform.system.has_mmx   = (id1[3] & 0x00800000u) ? 1 : 0;
-        lk_platform.system.has_sse   = (id1[3] & 0x02000000u) ? 1 : 0;
-        lk_platform.system.has_sse2  = (id1[3] & 0x04000000u) ? 1 : 0;
-        lk_platform.system.has_hyperthreading = (id1[3] & 0x10000000u) ? 1 : 0;
-        lk_platform.system.has_sse3  = (id1[2] & 0x00000001u) ? 1 : 0;
-        lk_platform.system.has_sse41 = (id1[2] & 0x00080000u) ? 1 : 0;
-        lk_platform.system.has_sse42 = (id1[2] & 0x00100000u) ? 1 : 0;
+        lk_platform->system.has_rdtsc = (id1[3] & 0x00000010u) ? 1 : 0;
+        lk_platform->system.has_mmx   = (id1[3] & 0x00800000u) ? 1 : 0;
+        lk_platform->system.has_sse   = (id1[3] & 0x02000000u) ? 1 : 0;
+        lk_platform->system.has_sse2  = (id1[3] & 0x04000000u) ? 1 : 0;
+        lk_platform->system.has_hyperthreading = (id1[3] & 0x10000000u) ? 1 : 0;
+        lk_platform->system.has_sse3  = (id1[2] & 0x00000001u) ? 1 : 0;
+        lk_platform->system.has_sse41 = (id1[2] & 0x00080000u) ? 1 : 0;
+        lk_platform->system.has_sse42 = (id1[2] & 0x00100000u) ? 1 : 0;
 
         if (os_saves_ymm)
         {
-            lk_platform.system.has_avx = (id1[2] & 0x10000000u) ? 1 : 0;
+            lk_platform->system.has_avx = (id1[2] & 0x10000000u) ? 1 : 0;
 
             if (max_function >= 7)
             {
-                lk_platform.system.has_avx2    = (id7[1] & 0x00000020u) ? 1 : 0;
-                lk_platform.system.has_avx512f = (id7[1] & 0x00010000u) && os_saves_zmm;
+                lk_platform->system.has_avx2    = (id7[1] & 0x00000020u) ? 1 : 0;
+                lk_platform->system.has_avx512f = (id7[1] & 0x00010000u) && os_saves_zmm;
             }
         }
     }
@@ -3059,7 +2979,7 @@ static void lk_fill_system_info()
     {
         if (id80000001[3] & 0x80000000)
         {
-            lk_platform.system.has_3dnow = 1;
+            lk_platform->system.has_3dnow = 1;
         }
     }
 
@@ -3071,32 +2991,13 @@ static void lk_fill_system_info()
     memory_status.dwLength = sizeof(memory_status);
     if (GlobalMemoryStatusEx(&memory_status))
     {
-        lk_platform.system.ram_bytes     = memory_status.ullTotalPhys;
-        lk_platform.system.ram_kilobytes = memory_status.ullTotalPhys / 1024;
-        lk_platform.system.ram_megabytes = memory_status.ullTotalPhys / (1024 * 1024);
+        lk_platform->system.ram_bytes     = memory_status.ullTotalPhys;
+        lk_platform->system.ram_kilobytes = memory_status.ullTotalPhys / 1024;
+        lk_platform->system.ram_megabytes = memory_status.ullTotalPhys / (1024 * 1024);
     }
-
-/*
-    printf("vendor: %s\n", vendor);
-    printf("logical count: %d\n", lk_platform.system.logical_count);
-    printf("cache line size: %d\n", lk_platform.system.cache_line_size);
-    if (lk_platform.system.has_rdtsc) printf("rdtsc\n");
-    if (lk_platform.system.has_mmx) printf("mmx\n");
-    if (lk_platform.system.has_sse) printf("sse\n");
-    if (lk_platform.system.has_sse2) printf("sse2\n");
-    if (lk_platform.system.has_sse3) printf("sse3\n");
-    if (lk_platform.system.has_sse41) printf("sse41\n");
-    if (lk_platform.system.has_sse42) printf("sse42\n");
-    if (lk_platform.system.has_avx) printf("avx\n");
-    if (lk_platform.system.has_avx2) printf("avx2\n");
-    if (lk_platform.system.has_avx512f) printf("avx\n");
-    if (lk_platform.system.has_3dnow) printf("3dnow\n");
-    if (lk_platform.system.has_hyperthreading) printf("hyperthreading\n");
-    printf("RAM: %llu bytes (%llu MB)\n", lk_platform.system.ram_bytes, lk_platform.system.ram_megabytes);
-*/
 }
 
-static void lk_get_command_line_arguments()
+static void lk_get_command_line_arguments(LK_Private* lk_private, LK_Platform* lk_platform)
 {
     LPWSTR command_line = GetCommandLineW();
 
@@ -3149,120 +3050,118 @@ static void lk_get_command_line_arguments()
 
     LocalFree(argv);
 
-    lk_platform.command_line.argument_count = argc;
-    lk_platform.command_line.arguments = result;
+    lk_platform->command_line.argument_count = argc;
+    lk_platform->command_line.arguments = result;
 }
 
-void lk_entry()
+void lk_entry(LK_Client_Functions* functions)
 {
-    lk_fill_system_info();
-    lk_get_command_line_arguments();
+    LK_Private lk_private_structure;
+    LK_Platform lk_platform_structure;
+    ZeroMemory(&lk_private_structure, sizeof(lk_private_structure));
+    ZeroMemory(&lk_platform_structure, sizeof(lk_platform_structure));
+
+    LK_Private* lk_private = &lk_private_structure;
+    LK_Platform* lk_platform = &lk_platform_structure;
+    lk_private->platform = lk_platform;
+    lk_platform->private_pointer = lk_private;
+
+
+    lk_fill_system_info(lk_private, lk_platform);
+    lk_get_command_line_arguments(lk_private, lk_platform);
 
 #ifndef LK_PLATFORM_NO_DLL
-    lk_get_dll_path();
-    lk_check_client_reload();
-    lk_get_temp_dll_path();
+    if (!functions)
+    {
+        lk_get_dll_path(lk_private);
+        lk_check_client_reload(lk_private);
+        lk_get_temp_dll_path(lk_private);
+    }
 #endif
 
-    lk_platform.window.x = LK_DEFAULT_POSITION;
-    lk_platform.window.y = LK_DEFAULT_POSITION;
+    lk_platform->window.x = LK_DEFAULT_POSITION;
+    lk_platform->window.y = LK_DEFAULT_POSITION;
 
-    lk_platform.opengl.color_bits   = 32;
-    lk_platform.opengl.depth_bits   = 24;
-    lk_platform.opengl.stencil_bits = 8;
-    lk_platform.opengl.sample_count = 1;
+    lk_platform->opengl.color_bits   = 32;
+    lk_platform->opengl.depth_bits   = 24;
+    lk_platform->opengl.stencil_bits = 8;
+    lk_platform->opengl.sample_count = 1;
 
-    lk_initialize_timer();
+    lk_initialize_timer(lk_private);
 
+    if (functions)
+    {
+        lk_copy_client_functions(lk_private, lk_platform, functions);
+    }
+    else
+    {
 #ifdef LK_PLATFORM_NO_DLL
-    lk_set_client_functions();
+        lk_set_client_functions(lk_private, lk_platform);
 #else
-    lk_load_client();
+        lk_load_client(lk_private, lk_platform);
 #endif
-
-    lk_private.client.init(&lk_platform);
-
-    lk_private.window.backend = lk_platform.window.backend;
-
-    if (!lk_platform.window.no_window)
-    {
-        lk_private.window.main_fiber = ConvertThreadToFiber(0);
-        lk_private.window.message_fiber = CreateFiber(0, lk_message_fiber_proc, 0);
-
-        lk_open_window();
     }
 
-    if (lk_platform.audio.strategy != LK_NO_AUDIO)
+    lk_private->client.init(lk_platform);
+
+    lk_private->window.backend = lk_platform->window.backend;
+
+    if (!lk_platform->window.no_window)
     {
-        lk_initialize_audio();
+        lk_private->window.main_fiber = ConvertThreadToFiber(0);
+        lk_private->window.message_fiber = CreateFiber(0, lk_message_fiber_proc, lk_private);
+
+        lk_open_window(lk_private, lk_platform);
     }
 
-    while (!lk_platform.break_frame_loop)
+    if (lk_platform->audio.strategy != LK_NO_AUDIO)
     {
-        lk_push();
-        lk_window_message_loop();
-        lk_pull();
+        lk_initialize_audio(lk_private, lk_platform);
+    }
+
+    while (!lk_platform->break_frame_loop)
+    {
+        lk_push(lk_private, lk_platform);
+        lk_window_message_loop(lk_private);
+        lk_pull(lk_private, lk_platform);
 
 #ifndef LK_PLATFORM_NO_DLL
-        if (lk_check_client_reload())
+        if (!functions && lk_check_client_reload(lk_private))
         {
-            lk_unload_client();
-            lk_load_client();
+            lk_unload_client(lk_private, lk_platform);
+            lk_load_client(lk_private, lk_platform);
         }
 #endif
 
-        lk_update_time_stamp();
-        lk_private.client.frame(&lk_platform);
+        lk_update_time_stamp(lk_private, lk_platform);
+        lk_private->client.frame(lk_platform);
 
-        lk_mixer_synchronize();
-        lk_window_swap_buffers();
+        lk_mixer_synchronize(lk_private, lk_platform);
+        lk_window_swap_buffers(lk_private, lk_platform);
     }
 
-    lk_update_time_stamp();
-    lk_private.client.close(&lk_platform);
+    lk_update_time_stamp(lk_private, lk_platform);
+    lk_private->client.close(lk_platform);
 
-    lk_close_window();
+    lk_close_window(lk_private, lk_platform);
 
 #ifdef LK_PLATFORM_NO_DLL
-    lk_private.client.dll_unload(&lk_platform);
+    lk_private->client.dll_unload(lk_platform);
 #else
-    lk_unload_client();
+    lk_unload_client(lk_private, lk_platform);
 #endif
-}
-
-#ifndef LK_PLATFORM_NO_DLL
-static BOOL WINAPI lk_console_ctrl_handler(DWORD ctrl_type)
-{
-    if (ctrl_type == CTRL_C_EVENT)
-    {
-        // We want to kill the client quickly, without calling dll_unload.
-        // That's why we set dll_unload to the stub function here.
-        lk_private.client.dll_unload = lk_client_dll_unload_stub;
-        lk_unload_client();
-    }
-
-    return FALSE;
-}
-#endif
-
-void lk_console_entry()
-{
-#ifndef LK_PLATFORM_NO_DLL
-    SetConsoleCtrlHandler(lk_console_ctrl_handler, TRUE);
-#endif
-    lk_entry();
 }
 
 #ifndef LK_PLATFORM_NO_MAIN
 int CALLBACK WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow)
 {
-    lk_entry();
+    lk_entry(NULL);
     return 0;
 }
 
 int main(int argc, char** argv)
 {
-    lk_console_entry();
+    lk_entry(NULL);
     return 0;
 }
 #endif
