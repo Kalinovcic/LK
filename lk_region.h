@@ -75,6 +75,7 @@ typedef LK__REGION_CACHE_ALIGN struct
     void* page_end;
     void* cursor;
     void* alloc_head;
+    uintptr_t alloc_count;
 } LK__REGION_CACHE_ALIGN_POST LK_Region;
 
 /* Use this macro to initialize region variables. Like this:
@@ -200,6 +201,7 @@ void* lk_region_alloc(LK_Region* region, size_t size, size_t alignment)
         void** header = (void**) page;
         *header = region->alloc_head;
         region->alloc_head = header;
+        region->alloc_count++;
 
         return page + alignment;
     }
@@ -225,6 +227,7 @@ void* lk_region_alloc(LK_Region* region, size_t size, size_t alignment)
 
         region->page_end = page_end;
         region->alloc_head = header;
+        region->alloc_count++;
 
         void* cursor = header + 1;
 
@@ -253,6 +256,7 @@ void lk_region_free(LK_Region* region)
         void** header = (void**) memory;
         void* next_memory = *header;
 
+        region->alloc_count--;
         lk_region_os_free(memory);
         memory = next_memory;
     }
@@ -281,6 +285,7 @@ void lk_region_rewind(LK_Region* region, LK_Region_Cursor* cursor)
         void** header = (void**) memory;
         void* next_memory = *header;
 
+        region->alloc_count--;
         lk_region_os_free(memory);
         memory = next_memory;
     }
@@ -315,22 +320,22 @@ THE UNLICENCE (http://unlicense.org)
 
     This is free and unencumbered software released into the public domain.
 
-    Anyone is free to copy, modify, publish, use, compile, sell, or distribute this 
-    software, either in source code form or as a compiled binary, for any purpose, 
+    Anyone is free to copy, modify, publish, use, compile, sell, or distribute this
+    software, either in source code form or as a compiled binary, for any purpose,
     commercial or non-commercial, and by any means.
 
-    In jurisdictions that recognize copyright laws, the author or authors of this 
-    software dedicate any and all copyright interest in the software to the public 
-    domain. We make this dedication for the benefit of the public at large and to 
-    the detriment of our heirs and successors. We intend this dedication to be an 
-    overt act of relinquishment in perpetuity of all present and future rights to 
+    In jurisdictions that recognize copyright laws, the author or authors of this
+    software dedicate any and all copyright interest in the software to the public
+    domain. We make this dedication for the benefit of the public at large and to
+    the detriment of our heirs and successors. We intend this dedication to be an
+    overt act of relinquishment in perpetuity of all present and future rights to
     this software under copyright law.
 
-    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR 
-    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, 
-    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE 
-    AUTHORS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN 
-    ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION 
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+    AUTHORS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
+    ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
     WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
  *********************************************************************************************/
