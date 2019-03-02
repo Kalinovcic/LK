@@ -501,6 +501,7 @@ typedef void LK_Client_Audio_Function(LK_Platform* platform, LK_S16* samples);
 typedef void LK_Client_Log_Function(LK_Platform* platform, const char* message, const char* file, int line);
 typedef void LK_Client_Dll_Load_Function(LK_Platform* platform);
 typedef void LK_Client_Dll_Unload_Function(LK_Platform* platform);
+typedef int  LK_Client_Win32_Event_Handler(LK_Platform* platform, void* window, LK_U32 message, void* wparam, void* lparam, void** out_return);
 
 
 typedef struct
@@ -512,6 +513,7 @@ typedef struct
     LK_Client_Log_Function*        log;
     LK_Client_Dll_Load_Function*   dll_load;
     LK_Client_Dll_Unload_Function* dll_unload;
+    LK_Client_Win32_Event_Handler* win32_event_handler;
 } LK_Client_Functions;
 
 void lk_entry(LK_Client_Functions* functions);
@@ -549,8 +551,6 @@ extern "C"
 #include <hidpi.h> // @Incomplete - get rid of this include
 #undef near
 #undef far
-
-typedef BOOL LK_Client_Win32_Event_Handler(LK_Platform* platform, HWND window, UINT message, WPARAM wparam, LPARAM lparam, LRESULT* out_return);
 
 enum
 {
@@ -698,7 +698,7 @@ static void lk_client_frame_stub(LK_Platform* platform) {}
 static void lk_client_close_stub(LK_Platform* platform) {}
 static void lk_client_dll_load_stub(LK_Platform* platform) {}
 static void lk_client_dll_unload_stub(LK_Platform* platform) {}
-static BOOL lk_client_win32_event_handler_stub(LK_Platform* platform, HWND window, UINT message, WPARAM wparam, LPARAM lparam, LRESULT* out_return) { return 0; }
+static int  lk_client_win32_event_handler_stub(LK_Platform* platform, void* window, LK_U32 message, void* wparam, void* lparam, void** out_return) { return 0; }
 
 static void lk_client_audio_stub(LK_Platform* platform, LK_S16* samples)
 {
@@ -720,8 +720,8 @@ static void lk_copy_client_functions(LK_Private* lk_private, LK_Platform* lk_pla
     LK_CopyClientFunction(log);
     LK_CopyClientFunction(dll_load);
     LK_CopyClientFunction(dll_unload);
+    LK_CopyClientFunction(win32_event_handler);
     #undef LK_CopyClientFunction
-    lk_private->client.win32_event_handler = lk_client_win32_event_handler_stub;
 }
 
 static void lk_load_client_functions_from_module(LK_Private* lk_private, LK_Platform* lk_platform, HMODULE module)
@@ -1131,6 +1131,16 @@ static void lk_pull(LK_Private* lk_private, LK_Platform* lk_platform)
     }
 
     lk_platform->window.has_focus = lk_private->window.has_focus;
+    if (!lk_platform->window.has_focus)
+    {
+        lk_platform->mouse.left_button.down = 0;
+        lk_platform->mouse.right_button.down = 0;
+        for (int key_index = 0; key_index < LK__KEY_COUNT; key_index++)
+        {
+            LK_Digital_Button* button = lk_platform->keyboard.state + key_index;
+            button->down = 0;
+        }
+    }
 
     lk_pull_window_data(lk_private, lk_platform);
     lk_pull_mouse_data(lk_platform);
@@ -1318,10 +1328,10 @@ lk_window_callback(HWND window, UINT message, WPARAM wparam, LPARAM lparam)
     }
 #endif
 
-    LPARAM user_return;
-    if (lk_private->client.win32_event_handler(lk_platform, window, message, wparam, lparam, &user_return))
+    void* user_return;
+    if (lk_private->client.win32_event_handler(lk_platform, window, message, (void*) wparam, (void*) lparam, &user_return))
     {
-        return user_return;
+        return (LPARAM) user_return;
     }
 
     if (window != lk_private->window.handle)
