@@ -3195,6 +3195,8 @@ static void lk_initialize_audio(LK_Private* lk_private, LK_Platform* lk_platform
 static void lk_fill_system_info(LK_Private* lk_private, LK_Platform* lk_platform)
 {
     // @Incomplete - On x86, check if we have cpuid at all.
+    void __cpuid(int[4], int);
+    unsigned __int64 _xgetbv(unsigned int);
 
     LK_U32 id0[4];
     LK_U32 id1[4];
