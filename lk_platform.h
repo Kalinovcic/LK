@@ -383,6 +383,12 @@ typedef struct LK_Platform_Structure
         LK_U32 icon_width;
         LK_U32 icon_height;
         LK_U8* icon_pixels; // must be RGBA, left to right, top to bottom
+
+        // The following members, except no_resize_on_dpi_change, are read-only.
+        LK_B32 no_resize_on_dpi_change;
+        LK_U32 dpi;
+        LK_F32 width_in_inches;
+        LK_F32 height_in_inches;
     } window;
 
     struct
@@ -599,6 +605,9 @@ typedef struct
         LK_B32 load_failed;
     } client;
 
+    HMODULE user32;
+    HMODULE shcore;
+
     struct
     {
         HWND handle;
@@ -685,11 +694,16 @@ typedef struct
 
 #define LK_Log(message)  lk_private->client.log(lk_platform, message, __FILE__, __LINE__)
 
-#define LK_GetProc(module, destination, name)    \
-{                                                \
-    FARPROC proc = GetProcAddress(module, name); \
-    if (proc)                                    \
-        *(FARPROC*) &destination = proc;         \
+#define LK_GetProc(module, destination, name)        \
+{                                                    \
+    if (module)                                      \
+    {                                                \
+        FARPROC proc = GetProcAddress(module, name); \
+        if (proc)                                    \
+            *(FARPROC*) &destination = proc;         \
+        else                                         \
+            destination = NULL;                      \
+    }                                                \
 }
 
 
@@ -726,31 +740,27 @@ static void lk_copy_client_functions(LK_Private* lk_private, LK_Platform* lk_pla
 
 static void lk_load_client_functions_from_module(LK_Private* lk_private, LK_Platform* lk_platform, HMODULE module)
 {
-    lk_private->client.init                = lk_client_init_stub;
-    lk_private->client.close               = lk_client_close_stub;
-    lk_private->client.frame               = lk_client_frame_stub;
-    lk_private->client.audio               = lk_client_audio_stub;
-    lk_private->client.log                 = lk_client_log_stub;
-    lk_private->client.dll_load            = lk_client_dll_load_stub;
-    lk_private->client.dll_unload          = lk_client_dll_unload_stub;
-    lk_private->client.win32_event_handler = lk_client_win32_event_handler_stub;
-
     lk_private->client.library = module;
+
+    #define LK_GetClientFunction(name)                                  \
+    {                                                                   \
+        LK_GetProc(module, lk_private->client.name, "lk_client_" #name) \
+        if (!lk_private->client.name)                                   \
+            lk_private->client.name = lk_client_##name##_stub;          \
+    }
+    LK_GetClientFunction(init);
+    LK_GetClientFunction(close);
+    LK_GetClientFunction(frame);
+    LK_GetClientFunction(audio);
+    LK_GetClientFunction(log);
+    LK_GetClientFunction(dll_load);
+    LK_GetClientFunction(dll_unload);
+    LK_GetClientFunction(win32_event_handler);
+    #undef LK_GetClientFunction
+
     if (module)
     {
         lk_private->client.load_failed = 0;
-
-        #define LK_GetClientFunction(name) LK_GetProc(module, lk_private->client.name, "lk_client_" #name)
-        LK_GetClientFunction(init);
-        LK_GetClientFunction(close);
-        LK_GetClientFunction(frame);
-        LK_GetClientFunction(audio);
-        LK_GetClientFunction(log);
-        LK_GetClientFunction(dll_load);
-        LK_GetClientFunction(dll_unload);
-        LK_GetClientFunction(win32_event_handler);
-        #undef LK_GetClientFunction
-
         lk_private->client.dll_load(lk_platform);
     }
     else
@@ -909,7 +919,7 @@ static LONG lk_apply_window_style(LK_Platform* lk_platform, LONG old_style, LK_B
     LONG resizable_flags = WS_THICKFRAME | WS_MAXIMIZEBOX;
     LONG decoration_flags = WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
 
-    LONG style = old_style & ~(resizable_flags | decoration_flags | WS_POPUP);
+    LONG style = old_style & ~(resizable_flags | decoration_flags | WS_POPUP | WS_MAXIMIZE);
 
     LK_B32 fullscreen = lk_platform->window.fullscreen && !ignore_fullscreen;
     if (!lk_platform->window.undecorated && !fullscreen)
@@ -922,7 +932,7 @@ static LONG lk_apply_window_style(LK_Platform* lk_platform, LONG old_style, LK_B
     }
     else
     {
-        style |= WS_POPUP;
+        style |= WS_POPUP | WS_MAXIMIZE;
     }
 
     return style;
@@ -1061,6 +1071,11 @@ static void lk_pull_window_data(LK_Private* lk_private, LK_Platform* lk_platform
     lk_platform->window.height = height;
     lk_private->window.width = width;
     lk_private->window.height = height;
+
+    // get width and height in inches
+    LK_F32 dpi = (LK_F32) lk_platform->window.dpi;
+    lk_platform->window.width_in_inches  = (LK_F32) width  / dpi;
+    lk_platform->window.height_in_inches = (LK_F32) height / dpi;
 
     // get X and Y
     POINT window_position = { client_rect.left, client_rect.top };
@@ -1309,7 +1324,24 @@ lk_window_callback(HWND window, UINT message, WPARAM wparam, LPARAM lparam)
 {
     LK_Private* lk_private = (LK_Private*) GetWindowLongPtrA(window, GWLP_USERDATA);
     if (!lk_private)
+    {
+        if (message == WM_NCCREATE)
+        {
+            HMODULE user32 = LoadLibraryA("user32.dll");
+            if (user32)
+            {
+                BOOL(WINAPI* EnableNonClientDpiScaling)(HWND hwnd);
+                LK_GetProc(user32, EnableNonClientDpiScaling, "EnableNonClientDpiScaling");
+                if (EnableNonClientDpiScaling)
+                {
+                    EnableNonClientDpiScaling(window);
+                }
+                FreeLibrary(user32);
+            }
+        }
+
         return DefWindowProcW(window, message, wparam, lparam);
+    }
 
     LK_Platform* lk_platform = lk_private->platform;
 
@@ -1360,6 +1392,27 @@ lk_window_callback(HWND window, UINT message, WPARAM wparam, LPARAM lparam)
     case WM_CLOSE:
     {
         lk_platform->break_frame_loop = 1;
+    } break;
+
+    #ifndef WM_DPICHANGED
+    #define WM_DPICHANGED 0x02E0
+    #endif
+    case WM_DPICHANGED:
+    {
+        DWORD new_dpi = LOWORD(wparam);
+
+        lk_platform->window.dpi = (LK_U32) new_dpi;
+
+        if (!lk_platform->window.no_resize_on_dpi_change)
+        {
+            RECT* new_rectangle = (RECT*) lparam;
+            int x      = new_rectangle->left;
+            int y      = new_rectangle->top;
+            int width  = new_rectangle->right - x;
+            int height = new_rectangle->bottom - y;
+            SetWindowPos(window, HWND_TOP, x, y, width, height, SWP_NOZORDER | SWP_NOACTIVATE);
+            RedrawWindow(window, NULL, NULL, RDW_ERASE | RDW_INVALIDATE);
+        }
     } break;
 
     case WM_CHAR:
@@ -2292,6 +2345,116 @@ undo_fake_window:
     return 0;
 }
 
+
+static LK_U32 lk_get_dpi_for_window(LK_Private* lk_private, LK_Platform* lk_platform)
+{
+    HWND window = lk_private->window.handle;
+
+    // Try best solution for Windows 10 Anniversary Update (1607) or later.
+    UINT(WINAPI *GetDpiForWindow)(HWND hwnd);
+    LK_GetProc(lk_private->user32, GetDpiForWindow, "GetDpiForWindow");
+    if (GetDpiForWindow)
+    {
+        LK_U32 result = GetDpiForWindow(window);
+        if (result)
+            return result;
+    }
+
+    // Try best solution for Windows 8.1 or later.
+    HMONITOR monitor = MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST);
+    if (monitor)
+    {
+        enum MONITOR_DPI_TYPE
+        {
+            MDT_EFFECTIVE_DPI,
+            MDT_ANGULAR_DPI,
+            MDT_RAW_DPI,
+            MDT_DEFAULT
+        };
+
+        HRESULT(WINAPI *GetDpiForMonitor)(HMONITOR hmonitor, MONITOR_DPI_TYPE dpiType, UINT* dpiX, UINT* dpiY);
+        LK_GetProc(lk_private->shcore, GetDpiForMonitor, "GetDpiForMonitor");
+        if (GetDpiForMonitor)
+        {
+            UINT dpi_x, dpi_y;
+            HRESULT status = GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &dpi_x, &dpi_y);
+            if (status == S_OK)
+                return dpi_x;
+        }
+    }
+
+    // Try best solution for Windows Vista or later.
+    BOOL(WINAPI *IsProcessDPIAware)();
+    LK_GetProc(lk_private->user32, IsProcessDPIAware, "IsProcessDPIAware");
+    if (IsProcessDPIAware)
+    {
+        if (IsProcessDPIAware())
+        {
+            HDC dc = GetDC(window);
+            if (dc)
+            {
+                return GetDeviceCaps(dc, LOGPIXELSX);
+            }
+        }
+    }
+
+    return 96;
+}
+
+#ifndef DPI_AWARENESS_CONTEXT_UNAWARE
+DECLARE_HANDLE(DPI_AWARENESS_CONTEXT);
+#define DPI_AWARENESS_CONTEXT_UNAWARE              ((DPI_AWARENESS_CONTEXT) - 1)
+#define DPI_AWARENESS_CONTEXT_SYSTEM_AWARE         ((DPI_AWARENESS_CONTEXT) - 2)
+#define DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE    ((DPI_AWARENESS_CONTEXT) - 3)
+#define DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 ((DPI_AWARENESS_CONTEXT) - 4)
+#define DPI_AWARENESS_CONTEXT_UNAWARE_GDISCALED    ((DPI_AWARENESS_CONTEXT) - 5)
+#endif
+
+static void lk_try_set_dpi_awareness(LK_Private* lk_private, LK_Platform* lk_platform)
+{
+    // Try best solution for Windows 10 ...
+    HRESULT(WINAPI *SetProcessDpiAwarenessContext)(DPI_AWARENESS_CONTEXT value);
+    LK_GetProc(lk_private->user32, SetProcessDpiAwarenessContext, "SetProcessDpiAwarenessContext");
+    if (SetProcessDpiAwarenessContext)
+    {
+        // ... Creators Update (1703) or later.
+        if (SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2))
+            return;
+
+        // ... Anniversary Update (1607) or later.
+        if (SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE))
+            return;
+    }
+
+    // Try best solution for Windows 8.1 or later.
+    enum PROCESS_DPI_AWARENESS
+    {
+        PROCESS_DPI_UNAWARE,
+        PROCESS_SYSTEM_DPI_AWARE,
+        PROCESS_PER_MONITOR_DPI_AWARE
+    };
+
+    HRESULT(WINAPI *SetProcessDpiAwareness)(PROCESS_DPI_AWARENESS value);
+    LK_GetProc(lk_private->shcore, SetProcessDpiAwareness, "SetProcessDpiAwareness");
+    if (SetProcessDpiAwareness)
+    {
+        if (SetProcessDpiAwareness(PROCESS_PER_MONITOR_DPI_AWARE) == S_OK)
+            return;
+    }
+
+    // Try best solution for Windows Vista or later.
+    BOOL(WINAPI* SetProcessDPIAware)();
+    LK_GetProc(lk_private->user32, SetProcessDPIAware, "SetProcessDPIAware");
+    if (SetProcessDPIAware)
+    {
+        if (SetProcessDPIAware())
+            return;
+    }
+
+    // Oh well...
+}
+
+
 static void lk_open_window(LK_Private* lk_private, LK_Platform* lk_platform)
 {
     WNDCLASSEXW window_class;
@@ -2359,6 +2522,7 @@ static void lk_open_window(LK_Private* lk_private, LK_Platform* lk_platform)
 
     lk_platform->window.handle = window_handle;
     lk_private->window.handle = window_handle;
+    lk_platform->window.dpi = lk_get_dpi_for_window(lk_private, lk_platform);
     lk_push(lk_private, lk_platform);
 
     SetForegroundWindow(window_handle);
@@ -3144,6 +3308,7 @@ static void lk_fill_system_info(LK_Private* lk_private, LK_Platform* lk_platform
     }
 }
 
+
 static void lk_get_command_line_arguments(LK_Private* lk_private, LK_Platform* lk_platform)
 {
     LPWSTR command_line = GetCommandLineW();
@@ -3213,8 +3378,11 @@ void lk_entry(LK_Client_Functions* functions)
     lk_private->platform = lk_platform;
     lk_platform->private_pointer = lk_private;
 
+    lk_private->user32 = LoadLibraryA("user32.dll");
+    lk_private->shcore = LoadLibraryA("shcore.dll");
 
     lk_fill_system_info(lk_private, lk_platform);
+    lk_try_set_dpi_awareness(lk_private, lk_platform);
     lk_get_command_line_arguments(lk_private, lk_platform);
 
 #ifndef LK_PLATFORM_NO_DLL
@@ -3298,6 +3466,10 @@ void lk_entry(LK_Client_Functions* functions)
 #else
     lk_unload_client(lk_private, lk_platform);
 #endif
+
+    if (lk_private->user32) FreeLibrary(lk_private->user32);
+    if (lk_private->shcore) FreeLibrary(lk_private->shcore);
+    if (lk_private->opengl.library) FreeLibrary(lk_private->opengl.library);
 }
 
 #ifndef LK_PLATFORM_NO_MAIN
