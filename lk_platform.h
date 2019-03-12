@@ -288,13 +288,13 @@ enum
     LK_GAMEPAD_ANALOG_COUNT
 };
 
-struct LK_Analog_Stick
+typedef struct LK_Analog_Stick_Structure
 {
     LK_F64 x;
     LK_F64 y;
-};
+} LK_Analog_Stick;
 
-struct LK_Gamepad
+typedef struct LK_Gamepad_Structure
 {
     LK_Digital_Button buttons[LK_GAMEPAD_BUTTON_COUNT];
     LK_F64 analog[LK_GAMEPAD_ANALOG_COUNT];
@@ -309,7 +309,7 @@ struct LK_Gamepad
         // Examples: 0 is right, 90 is up, 180 is left, 270 is down.
         LK_F64 angle;
     } hat;
-};
+} LK_Gamepad;
 
 enum
 {
@@ -331,7 +331,7 @@ typedef struct
     LK_U32 frequency;
 } LK_Wave;
 
-typedef struct
+typedef struct LK_Sound_Structure
 {
     LK_B32 playing;
     LK_Wave wave;
@@ -549,12 +549,11 @@ extern "C"
 #endif
 
 #define NOMINMAX
+#define WIN32_LEAN_AND_MEAN
 #include <windows.h> // @Incomplete - get rid of this include
-#include <dsound.h> // @Incomplete - get rid of this include
-#include <intrin.h> // @Incomplete - get rid of this include
-#include <hidclass.h> // @Incomplete - get rid of this include
-#include <hidsdi.h> // @Incomplete - get rid of this include
-#include <hidpi.h> // @Incomplete - get rid of this include
+#include <mmreg.h>   // @Incomplete - get rid of this include
+#include <dsound.h>  // @Incomplete - get rid of this include
+#include <hidsdi.h>  // @Incomplete - get rid of this include
 #undef near
 #undef far
 
@@ -607,6 +606,7 @@ typedef struct
 
     HMODULE user32;
     HMODULE shcore;
+    HMODULE shell32;
 
     struct
     {
@@ -652,7 +652,19 @@ typedef struct
         LK_B32 has_last_mousemove;
         LK_S32 last_mousemove_x;
         LK_S32 last_mousemove_y;
+        HCURSOR arrow_cursor;
     } mouse;
+
+    struct
+    {
+        LK_B32 available;
+        HMODULE library;
+        NTSTATUS(WINAPI* HidP_GetCaps)(PHIDP_PREPARSED_DATA PreparsedData, PHIDP_CAPS Capabilities);
+        NTSTATUS(WINAPI* HidP_GetButtonCaps)(HIDP_REPORT_TYPE ReportType, PHIDP_BUTTON_CAPS ButtonCaps, PUSHORT ButtonCapsLength, PHIDP_PREPARSED_DATA PreparsedData);
+        NTSTATUS(WINAPI* HidP_GetValueCaps)(HIDP_REPORT_TYPE ReportType, PHIDP_VALUE_CAPS ValueCaps, PUSHORT ValueCapsLength, PHIDP_PREPARSED_DATA PreparsedData);
+        NTSTATUS(WINAPI* HidP_GetUsages)(HIDP_REPORT_TYPE ReportType, USAGE UsagePage, USHORT LinkCollection, PUSAGE UsageList, PULONG UsageLength, PHIDP_PREPARSED_DATA PreparsedData, PCHAR Report, ULONG ReportLength);
+        NTSTATUS(WINAPI* HidP_GetUsageValue)(HIDP_REPORT_TYPE ReportType, USAGE UsagePage, USHORT LinkCollection, USAGE Usage, PULONG UsageValue, PHIDP_PREPARSED_DATA PreparsedData, PCHAR Report, ULONG ReportLength);
+    } hidpi;
 
     struct
     {
@@ -1591,7 +1603,7 @@ lk_window_callback(HWND window, UINT message, WPARAM wparam, LPARAM lparam)
             }
 
             HIDP_CAPS capabilities;
-            if (HidP_GetCaps(preparsed_data, &capabilities) != HIDP_STATUS_SUCCESS)
+            if (lk_private->hidpi.HidP_GetCaps(preparsed_data, &capabilities) != HIDP_STATUS_SUCCESS)
             {
                 LocalFree(preparsed_data);
                 LK_Log("Failed to get HID capabilities; HidP_GetCaps() failed.");
@@ -1614,7 +1626,7 @@ lk_window_callback(HWND window, UINT message, WPARAM wparam, LPARAM lparam)
                     USHORT button_capability_count = capabilities.NumberInputButtonCaps;
                     HIDP_BUTTON_CAPS* button_capability_array = (HIDP_BUTTON_CAPS*) LocalAlloc(LMEM_FIXED, sizeof(HIDP_BUTTON_CAPS) * button_capability_count);
 
-                    if (HidP_GetButtonCaps(HidP_Input, button_capability_array, &button_capability_count, preparsed_data) != HIDP_STATUS_SUCCESS)
+                    if (lk_private->hidpi.HidP_GetButtonCaps(HidP_Input, button_capability_array, &button_capability_count, preparsed_data) != HIDP_STATUS_SUCCESS)
                     {
                         LocalFree(preparsed_data);
                         LocalFree(button_capability_array);
@@ -1631,7 +1643,7 @@ lk_window_callback(HWND window, UINT message, WPARAM wparam, LPARAM lparam)
                         USAGE* usages = (USAGE*) LocalAlloc(LMEM_FIXED, sizeof(USAGE) * number_of_buttons);
                         ULONG usage_count = number_of_buttons;
 
-                        if (HidP_GetUsages(HidP_Input, usage_page, 0, usages, &usage_count, preparsed_data, raw_data, raw_size) != HIDP_STATUS_SUCCESS)
+                        if (lk_private->hidpi.HidP_GetUsages(HidP_Input, usage_page, 0, usages, &usage_count, preparsed_data, raw_data, raw_size) != HIDP_STATUS_SUCCESS)
                         {
                             LocalFree(usages);
                             LocalFree(preparsed_data);
@@ -1670,7 +1682,7 @@ lk_window_callback(HWND window, UINT message, WPARAM wparam, LPARAM lparam)
                     USHORT value_capability_count = capabilities.NumberInputValueCaps;
                     HIDP_VALUE_CAPS* value_capability_array = (HIDP_VALUE_CAPS*) LocalAlloc(LMEM_FIXED, sizeof(HIDP_VALUE_CAPS) * value_capability_count);
 
-                    if (HidP_GetValueCaps(HidP_Input, value_capability_array, &value_capability_count, preparsed_data) != HIDP_STATUS_SUCCESS)
+                    if (lk_private->hidpi.HidP_GetValueCaps(HidP_Input, value_capability_array, &value_capability_count, preparsed_data) != HIDP_STATUS_SUCCESS)
                     {
                         LocalFree(preparsed_data);
                         LocalFree(value_capability_array);
@@ -1685,7 +1697,7 @@ lk_window_callback(HWND window, UINT message, WPARAM wparam, LPARAM lparam)
                         USAGE usage = value_capabilities->Range.UsageMin;
 
                         ULONG value;
-                        if (HidP_GetUsageValue(HidP_Input, usage_page, 0, usage, &value, preparsed_data, raw_data, raw_size) != HIDP_STATUS_SUCCESS)
+                        if (lk_private->hidpi.HidP_GetUsageValue(HidP_Input, usage_page, 0, usage, &value, preparsed_data, raw_data, raw_size) != HIDP_STATUS_SUCCESS)
                         {
                             LocalFree(preparsed_data);
                             LocalFree(value_capability_array);
@@ -1779,8 +1791,7 @@ lk_window_callback(HWND window, UINT message, WPARAM wparam, LPARAM lparam)
     {
         if (LOWORD(lparam) == HTCLIENT)
         {
-            static HCURSOR cursor = LoadCursor(NULL, IDC_ARROW);
-            SetCursor(cursor);
+            SetCursor(lk_private->mouse.arrow_cursor);
             return 1;
         }
 
@@ -2364,13 +2375,13 @@ static LK_U32 lk_get_dpi_for_window(LK_Private* lk_private, LK_Platform* lk_plat
     HMONITOR monitor = MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST);
     if (monitor)
     {
-        enum MONITOR_DPI_TYPE
+        typedef enum
         {
             MDT_EFFECTIVE_DPI,
             MDT_ANGULAR_DPI,
             MDT_RAW_DPI,
             MDT_DEFAULT
-        };
+        } MONITOR_DPI_TYPE;
 
         HRESULT(WINAPI *GetDpiForMonitor)(HMONITOR hmonitor, MONITOR_DPI_TYPE dpiType, UINT* dpiX, UINT* dpiY);
         LK_GetProc(lk_private->shcore, GetDpiForMonitor, "GetDpiForMonitor");
@@ -2427,12 +2438,12 @@ static void lk_try_set_dpi_awareness(LK_Private* lk_private, LK_Platform* lk_pla
     }
 
     // Try best solution for Windows 8.1 or later.
-    enum PROCESS_DPI_AWARENESS
+    typedef enum
     {
         PROCESS_DPI_UNAWARE,
         PROCESS_SYSTEM_DPI_AWARE,
         PROCESS_PER_MONITOR_DPI_AWARE
-    };
+    } PROCESS_DPI_AWARENESS;
 
     HRESULT(WINAPI *SetProcessDpiAwareness)(PROCESS_DPI_AWARENESS value);
     LK_GetProc(lk_private->shcore, SetProcessDpiAwareness, "SetProcessDpiAwareness");
@@ -2588,61 +2599,55 @@ static void lk_open_window(LK_Private* lk_private, LK_Platform* lk_platform)
         }
     }
 
-#if 0
-    lk_load_directinput_library();
-#endif
-
     lk_pull(lk_private, lk_platform);
     lk_update_canvas(lk_private, lk_platform);
     lk_update_swap_interval(lk_private, lk_platform);
 
-#if 0
-    UINT count_raw_devices = 0;
-    GetRawInputDeviceList(NULL, &count_raw_devices, sizeof(RAWINPUTDEVICELIST));
-    printf("Detected %d raw input devices:\n", count_raw_devices);
-    RAWINPUTDEVICELIST* devices = (RAWINPUTDEVICELIST*) malloc(sizeof(RAWINPUTDEVICELIST) * count_raw_devices);
-    GetRawInputDeviceList(devices, &count_raw_devices, sizeof(RAWINPUTDEVICELIST));
-    for (int i = 0; i < count_raw_devices; i++)
-    {
-        HANDLE device = devices[i].hDevice;
-        RID_DEVICE_INFO device_info;
-        device_info.cbSize = sizeof(RID_DEVICE_INFO);
-        UINT size = sizeof(RID_DEVICE_INFO);
-        GetRawInputDeviceInfoA(device, RIDI_DEVICEINFO, &device_info, &size);
-
-        const char* type[] = { "mouse", "keyboard", "other" };
-        printf("  %s", type[device_info.dwType]);
-        if (device_info.dwType == 2)
-        {
-            printf(" - usage %d, page %d", device_info.hid.usUsage, device_info.hid.usUsagePage);
-        }
-        printf("\n");
+    lk_private->hidpi.available = 1;
+    lk_private->hidpi.library = LoadLibraryA("hidpi.dll");
+    #define LK_GetHidPFunction(name)                                         \
+    {                                                                        \
+        LK_GetProc(lk_private->hidpi.library, lk_private->hidpi.name, #name) \
+        if (!lk_private->hidpi.name)                                         \
+            lk_private->hidpi.available = 0;                                 \
     }
-    free(devices);
-#endif
+    LK_GetHidPFunction(HidP_GetCaps)
+    LK_GetHidPFunction(HidP_GetButtonCaps)
+    LK_GetHidPFunction(HidP_GetValueCaps)
+    LK_GetHidPFunction(HidP_GetUsages)
+    LK_GetHidPFunction(HidP_GetUsageValue)
+    #undef LK_GetHidPFunction
 
 
+    UINT device_count = 0;
     RAWINPUTDEVICE devices[4];
     ZeroMemory(devices, sizeof(devices));
 
     // Mouse
-    devices[0].usUsagePage = 0x01;
-    devices[0].usUsage = 0x02;
-    devices[0].hwndTarget = window_handle;
+    UINT mouse_device = device_count++;
+    devices[mouse_device].usUsagePage = 0x01;
+    devices[mouse_device].usUsage = 0x02;
+    devices[mouse_device].hwndTarget = window_handle;
     // Keyboard
-    devices[1].usUsagePage = 0x01;
-    devices[1].usUsage = 0x06;
-    devices[1].hwndTarget = window_handle;
-    // Joystick
-    devices[2].usUsagePage = 0x01;
-    devices[2].usUsage = 0x04;
-    devices[2].hwndTarget = window_handle;
-    // Gamepad
-    devices[3].usUsagePage = 0x01;
-    devices[3].usUsage = 0x05;
-    devices[3].hwndTarget = window_handle;
+    UINT keyboard_device = device_count++;
+    devices[keyboard_device].usUsagePage = 0x01;
+    devices[keyboard_device].usUsage = 0x06;
+    devices[keyboard_device].hwndTarget = window_handle;
+    if (lk_private->hidpi.available)
+    {
+        // Joystick
+        UINT joystick_device = device_count++;
+        devices[joystick_device].usUsagePage = 0x01;
+        devices[joystick_device].usUsage = 0x04;
+        devices[joystick_device].hwndTarget = window_handle;
+        // Gamepad
+        UINT gamepad_device = device_count++;
+        devices[gamepad_device].usUsagePage = 0x01;
+        devices[gamepad_device].usUsage = 0x05;
+        devices[gamepad_device].hwndTarget = window_handle;
+    }
 
-    if (!RegisterRawInputDevices(devices, sizeof(devices) / sizeof(devices[0]), sizeof(devices[0])))
+    if (!RegisterRawInputDevices(devices, device_count, sizeof(devices[0])))
     {
         LK_Log("Failed to register input devices; the window won't receive input.");
         return;
@@ -2699,8 +2704,8 @@ static void CALLBACK lk_message_fiber_proc(void* lk_private_ptr)
 
 static void lk_check_for_raw_input(LK_Private* lk_private)
 {
-    lk_private->window.has_raw_mouse_input    = false;
-    lk_private->window.has_raw_keyboard_input = false;
+    lk_private->window.has_raw_mouse_input    = 0;
+    lk_private->window.has_raw_keyboard_input = 0;
 
     RAWINPUTDEVICE* devices = NULL;
     UINT device_count = 4;
@@ -2727,9 +2732,9 @@ static void lk_check_for_raw_input(LK_Private* lk_private)
         if (device->usUsagePage != 0x01) continue;
 
         if (device->usUsage == 0x02)
-            lk_private->window.has_raw_mouse_input = true;
+            lk_private->window.has_raw_mouse_input = 1;
         else if (device->usUsage == 0x06)
-            lk_private->window.has_raw_keyboard_input = true;
+            lk_private->window.has_raw_keyboard_input = 1;
     }
 
     LocalFree(devices);
@@ -3313,6 +3318,13 @@ static void lk_get_command_line_arguments(LK_Private* lk_private, LK_Platform* l
 {
     LPWSTR command_line = GetCommandLineW();
 
+    LPWSTR*(WINAPI *CommandLineToArgvW)(LPCWSTR lpCmdLine, int* pNumArgs);
+    LK_GetProc(lk_private->shell32, CommandLineToArgvW, "CommandLineToArgvW");
+    if (!CommandLineToArgvW)
+    {
+        return;
+    }
+
     int argc;
     LPWSTR* argv = CommandLineToArgvW(command_line, &argc);
     if (!argv)
@@ -3378,8 +3390,10 @@ void lk_entry(LK_Client_Functions* functions)
     lk_private->platform = lk_platform;
     lk_platform->private_pointer = lk_private;
 
-    lk_private->user32 = LoadLibraryA("user32.dll");
-    lk_private->shcore = LoadLibraryA("shcore.dll");
+    lk_private->user32  = LoadLibraryA("user32.dll");
+    lk_private->shcore  = LoadLibraryA("shcore.dll");
+    lk_private->shell32 = LoadLibraryA("shell32.dll");
+    lk_private->mouse.arrow_cursor = LoadCursor(NULL, IDC_ARROW);
 
     lk_fill_system_info(lk_private, lk_platform);
     lk_try_set_dpi_awareness(lk_private, lk_platform);
@@ -3469,6 +3483,8 @@ void lk_entry(LK_Client_Functions* functions)
 
     if (lk_private->user32) FreeLibrary(lk_private->user32);
     if (lk_private->shcore) FreeLibrary(lk_private->shcore);
+    if (lk_private->shell32) FreeLibrary(lk_private->shell32);
+    if (lk_private->hidpi.library) FreeLibrary(lk_private->hidpi.library);
     if (lk_private->opengl.library) FreeLibrary(lk_private->opengl.library);
 }
 
