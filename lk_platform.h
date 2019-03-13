@@ -935,21 +935,21 @@ static LONG lk_apply_window_style(LK_Platform* lk_platform, LONG old_style, LK_B
 {
     LONG resizable_flags = WS_THICKFRAME | WS_MAXIMIZEBOX;
     LONG decoration_flags = WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
+    LONG fullscreen_flags = WS_POPUP | WS_MAXIMIZE;
 
-    LONG style = old_style & ~(resizable_flags | decoration_flags | WS_POPUP | WS_MAXIMIZE);
+    LONG style = old_style & ~(resizable_flags | decoration_flags | fullscreen_flags);
 
     LK_B32 fullscreen = lk_platform->window.fullscreen && !ignore_fullscreen;
-    if (!lk_platform->window.undecorated && !fullscreen)
+    if (fullscreen)
     {
-        style |= decoration_flags;
-        if (!lk_platform->window.forbid_resizing)
-        {
-            style |= resizable_flags;
-        }
+        style |= fullscreen_flags;
     }
     else
     {
-        style |= WS_POPUP | WS_MAXIMIZE;
+        if (!lk_platform->window.undecorated)
+            style |= decoration_flags;
+        if (!lk_platform->window.forbid_resizing)
+            style |= resizable_flags;
     }
 
     return style;
