@@ -407,6 +407,8 @@ typedef struct LK_Platform_Structure
     {
         LK_Digital_Button state[LK__KEY_COUNT];
         char* text; // UTF-8 formatted string.
+
+        LK_B32 disable_windows_keys;
     } keyboard;
 
     LK_Gamepad gamepads[LK_MAX_GAMEPADS];
@@ -645,6 +647,9 @@ typedef struct
     {
         int text_size;
         char text_buffer[LK_MAX_TEXT_SIZE];
+
+        LK_B32 hook_installed;
+        HHOOK hook;
     } keyboard;
 
     struct
@@ -1042,6 +1047,50 @@ static void lk_window_update_title(LK_Private* lk_private, LK_Platform* lk_platf
     }
 }
 
+static LRESULT CALLBACK lk_low_level_keyboard_hook(int code, WPARAM wparam, LPARAM lparam)
+{
+    if (code == HC_ACTION)
+    {
+        KBDLLHOOKSTRUCT* kb = (KBDLLHOOKSTRUCT*) lparam;
+        if (kb->vkCode == VK_LWIN || kb->vkCode == VK_RWIN)
+            return 1;
+    }
+    return CallNextHookEx(0, code, wparam, lparam);
+}
+
+static void lk_push_keyboard_data(LK_Private* lk_private, LK_Platform* lk_platform)
+{
+    if (lk_platform->keyboard.disable_windows_keys && lk_private->window.has_focus)
+    {
+        if (!lk_private->keyboard.hook_installed)
+        {
+            lk_private->keyboard.hook_installed = 1;
+            lk_private->keyboard.hook = SetWindowsHookEx(WH_KEYBOARD_LL, lk_low_level_keyboard_hook, GetModuleHandle(NULL), 0);
+            if (lk_private->keyboard.hook == NULL)
+            {
+                LK_Log("Failed to install a low-level keyboard hook to disable Windows keys.");
+            }
+        }
+    }
+    else
+    {
+        if (lk_private->keyboard.hook_installed)
+        {
+            lk_private->keyboard.hook_installed = 0;
+            if (lk_private->keyboard.hook != NULL)
+            {
+                UnhookWindowsHookEx(lk_private->keyboard.hook);
+                lk_private->keyboard.hook = NULL;
+            }
+        }
+    }
+
+    for (int key_index = 0; key_index < LK__KEY_COUNT; key_index++)
+    {
+        lk_platform->keyboard.state[key_index].repeated = 0;
+    }
+}
+
 static void lk_push(LK_Private* lk_private, LK_Platform* lk_platform)
 {
     HWND window = lk_private->window.handle;
@@ -1060,11 +1109,7 @@ static void lk_push(LK_Private* lk_private, LK_Platform* lk_platform)
 
     lk_push_window_data(lk_private, lk_platform);
     lk_window_update_title(lk_private, lk_platform);
-
-    for (int key_index = 0; key_index < LK__KEY_COUNT; key_index++)
-    {
-        lk_platform->keyboard.state[key_index].repeated = 0;
-    }
+    lk_push_keyboard_data(lk_private, lk_platform);
 }
 
 
@@ -2632,6 +2677,7 @@ static void lk_open_window(LK_Private* lk_private, LK_Platform* lk_platform)
     UINT keyboard_device = device_count++;
     devices[keyboard_device].usUsagePage = 0x01;
     devices[keyboard_device].usUsage = 0x06;
+    devices[keyboard_device].dwFlags = RIDEV_NOHOTKEYS;
     devices[keyboard_device].hwndTarget = window_handle;
     if (lk_private->hidpi.available)
     {
