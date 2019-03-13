@@ -713,13 +713,12 @@ typedef struct
 
 #define LK_GetProc(module, destination, name)        \
 {                                                    \
+    destination = NULL;                              \
     if (module)                                      \
     {                                                \
         FARPROC proc = GetProcAddress(module, name); \
         if (proc)                                    \
             *(FARPROC*) &destination = proc;         \
-        else                                         \
-            destination = NULL;                      \
     }                                                \
 }
 
@@ -1051,11 +1050,14 @@ static LRESULT CALLBACK lk_low_level_keyboard_hook(int code, WPARAM wparam, LPAR
 {
     if (code == HC_ACTION)
     {
-        KBDLLHOOKSTRUCT* kb = (KBDLLHOOKSTRUCT*) lparam;
-        if (kb->vkCode == VK_LWIN || kb->vkCode == VK_RWIN)
-            return 1;
+        if (wparam == WM_KEYDOWN || wparam == WM_KEYUP || wparam == WM_SYSKEYDOWN || wparam == WM_SYSKEYUP)
+        {
+            KBDLLHOOKSTRUCT* kb = (KBDLLHOOKSTRUCT*) lparam;
+            if (kb->vkCode == VK_LWIN || kb->vkCode == VK_RWIN)
+                return 1;
+        }
     }
-    return CallNextHookEx(0, code, wparam, lparam);
+    return CallNextHookEx(NULL, code, wparam, lparam);
 }
 
 static void lk_push_keyboard_data(LK_Private* lk_private, LK_Platform* lk_platform)
