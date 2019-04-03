@@ -399,6 +399,11 @@ typedef struct LK_Platform_Structure
         LK_S32 delta_y;
         LK_S32 delta_wheel;
 
+        // These are in a hardware-specific, native resolution, if available.
+        // Otherwise they match delta_x and delta_y.
+        LK_S32 delta_x_raw;
+        LK_S32 delta_y_raw;
+
         LK_Digital_Button left_button;
         LK_Digital_Button right_button;
     } mouse;
@@ -1104,6 +1109,8 @@ static void lk_push(LK_Private* lk_private, LK_Platform* lk_platform)
     lk_platform->mouse.delta_x = 0;
     lk_platform->mouse.delta_y = 0;
     lk_platform->mouse.delta_wheel = 0;
+    lk_platform->mouse.delta_x_raw = 0;
+    lk_platform->mouse.delta_y_raw = 0;
 
     lk_private->keyboard.text_size = 0;
     lk_private->keyboard.text_buffer[0] = 0;
@@ -1146,7 +1153,7 @@ static void lk_pull_window_data(LK_Private* lk_private, LK_Platform* lk_platform
     lk_private->window.y = window_position.y;
 }
 
-static void lk_pull_mouse_data(LK_Platform* lk_platform)
+static void lk_pull_mouse_data(LK_Private* lk_private, LK_Platform* lk_platform)
 {
     POINT mouse_position;
     GetCursorPos(&mouse_position);
@@ -1156,6 +1163,12 @@ static void lk_pull_mouse_data(LK_Platform* lk_platform)
 
     lk_platform->mouse.x = mouse_position.x;
     lk_platform->mouse.y = mouse_position.y;
+
+    if (!lk_private->window.has_raw_mouse_input)
+    {
+        lk_platform->mouse.delta_x_raw = lk_platform->mouse.delta_x;
+        lk_platform->mouse.delta_y_raw = lk_platform->mouse.delta_y;
+    }
 }
 
 static void lk_update_digital_button(LK_Digital_Button* button)
@@ -1217,7 +1230,7 @@ static void lk_pull(LK_Private* lk_private, LK_Platform* lk_platform)
     }
 
     lk_pull_window_data(lk_private, lk_platform);
-    lk_pull_mouse_data(lk_platform);
+    lk_pull_mouse_data(lk_private, lk_platform);
 
     lk_update_digital_button(&lk_platform->mouse.left_button);
     lk_update_digital_button(&lk_platform->mouse.right_button);
@@ -1524,7 +1537,7 @@ lk_window_callback(HWND window, UINT message, WPARAM wparam, LPARAM lparam)
     {
         LK_S32 x = (LK_S16)(LK_U16)(lparam);
         LK_S32 y = (LK_S16)(LK_U16)(lparam >> 16);
-        if (!lk_private->window.has_raw_mouse_input && lk_private->mouse.has_last_mousemove)
+        if (lk_private->mouse.has_last_mousemove)
         {
             lk_platform->mouse.delta_x += x - lk_private->mouse.last_mousemove_x;
             lk_platform->mouse.delta_y += y - lk_private->mouse.last_mousemove_y;
@@ -1591,8 +1604,8 @@ lk_window_callback(HWND window, UINT message, WPARAM wparam, LPARAM lparam)
         {
             USHORT button_flags = input->data.mouse.usButtonFlags;
 
-            lk_platform->mouse.delta_x += input->data.mouse.lLastX;
-            lk_platform->mouse.delta_y += input->data.mouse.lLastY;
+            lk_platform->mouse.delta_x_raw += input->data.mouse.lLastX;
+            lk_platform->mouse.delta_y_raw += input->data.mouse.lLastY;
 
             if (button_flags & RI_MOUSE_LEFT_BUTTON_DOWN)
             {
@@ -2679,7 +2692,7 @@ static void lk_open_window(LK_Private* lk_private, LK_Platform* lk_platform)
     UINT keyboard_device = device_count++;
     devices[keyboard_device].usUsagePage = 0x01;
     devices[keyboard_device].usUsage = 0x06;
-    devices[keyboard_device].dwFlags = RIDEV_NOHOTKEYS;
+    // devices[keyboard_device].dwFlags = RIDEV_NOHOTKEYS;
     devices[keyboard_device].hwndTarget = window_handle;
     if (lk_private->hidpi.available)
     {
