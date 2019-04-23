@@ -406,6 +406,7 @@ typedef struct LK_Platform_Structure
 
         LK_Digital_Button left_button;
         LK_Digital_Button right_button;
+        LK_Digital_Button middle_button;
     } mouse;
 
     struct
@@ -1222,6 +1223,7 @@ static void lk_pull(LK_Private* lk_private, LK_Platform* lk_platform)
     {
         lk_platform->mouse.left_button.down = 0;
         lk_platform->mouse.right_button.down = 0;
+        lk_platform->mouse.middle_button.down = 0;
         for (int key_index = 0; key_index < LK__KEY_COUNT; key_index++)
         {
             LK_Digital_Button* button = lk_platform->keyboard.state + key_index;
@@ -1234,6 +1236,7 @@ static void lk_pull(LK_Private* lk_private, LK_Platform* lk_platform)
 
     lk_update_digital_button(&lk_platform->mouse.left_button);
     lk_update_digital_button(&lk_platform->mouse.right_button);
+    lk_update_digital_button(&lk_platform->mouse.middle_button);
 
     for (int key_index = 0; key_index < LK__KEY_COUNT; key_index++)
     {
@@ -1524,7 +1527,14 @@ lk_window_callback(HWND window, UINT message, WPARAM wparam, LPARAM lparam)
     case WM_RBUTTONDOWN:
     {
         if (lk_private->window.has_raw_mouse_input) break;
-        lk_platform->mouse.right_button.down = (message == WM_LBUTTONDOWN);
+        lk_platform->mouse.right_button.down = (message == WM_RBUTTONDOWN);
+    } break;
+
+    case WM_MBUTTONUP:
+    case WM_MBUTTONDOWN:
+    {
+        if (lk_private->window.has_raw_mouse_input) break;
+        lk_platform->mouse.middle_button.down = (message == WM_MBUTTONDOWN);
     } break;
 
     case WM_MOUSEWHEEL:
@@ -1623,6 +1633,15 @@ lk_window_callback(HWND window, UINT message, WPARAM wparam, LPARAM lparam)
             if (button_flags & RI_MOUSE_RIGHT_BUTTON_UP)
             {
                 lk_platform->mouse.right_button.down = 0;
+            }
+
+            if (button_flags & RI_MOUSE_MIDDLE_BUTTON_DOWN)
+            {
+                lk_platform->mouse.middle_button.down = 1;
+            }
+            if (button_flags & RI_MOUSE_MIDDLE_BUTTON_UP)
+            {
+                lk_platform->mouse.middle_button.down = 0;
             }
 
             if (button_flags & RI_MOUSE_WHEEL)
