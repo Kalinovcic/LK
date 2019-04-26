@@ -389,6 +389,9 @@ typedef struct LK_Platform_Structure
         LK_U32 dpi;
         LK_F32 width_in_inches;
         LK_F32 height_in_inches;
+
+        LK_B32 keep_image_from_last_frame;       // Reset to 0 before each call to lk_client_frame. Set this to non-0 if you want to prevent a buffer swap.
+        LK_B32 received_input_since_last_frame;  // Read-only. Includes window events, mouse events and keyboard events.
     } window;
 
     struct
@@ -1456,12 +1459,22 @@ lk_window_callback(HWND window, UINT message, WPARAM wparam, LPARAM lparam)
 
     case WM_SETFOCUS:
     {
+        lk_platform->window.received_input_since_last_frame = 1;
         lk_private->window.has_focus = 1;
     } break;
 
     case WM_KILLFOCUS:
     {
+        lk_platform->window.received_input_since_last_frame = 1;
         lk_private->window.has_focus = 0;
+    } break;
+
+    case WM_MOVING:
+    case WM_MOVE:
+    case WM_SIZING:
+    case WM_SIZE:
+    {
+        lk_platform->window.received_input_since_last_frame = 1;
     } break;
 
     case WM_CLOSE:
@@ -1519,34 +1532,49 @@ lk_window_callback(HWND window, UINT message, WPARAM wparam, LPARAM lparam)
     case WM_LBUTTONUP:
     case WM_LBUTTONDOWN:
     {
-        if (lk_private->window.has_raw_mouse_input) break;
-        lk_platform->mouse.left_button.down = (message == WM_LBUTTONDOWN);
+        lk_platform->window.received_input_since_last_frame = 1;
+        if (!lk_private->window.has_raw_mouse_input)
+        {
+            lk_platform->mouse.left_button.down = (message == WM_LBUTTONDOWN);
+        }
     } break;
 
     case WM_RBUTTONUP:
     case WM_RBUTTONDOWN:
     {
-        if (lk_private->window.has_raw_mouse_input) break;
-        lk_platform->mouse.right_button.down = (message == WM_RBUTTONDOWN);
+        lk_platform->window.received_input_since_last_frame = 1;
+        if (!lk_private->window.has_raw_mouse_input)
+        {
+            lk_platform->mouse.right_button.down = (message == WM_RBUTTONDOWN);
+        }
     } break;
 
     case WM_MBUTTONUP:
     case WM_MBUTTONDOWN:
     {
-        if (lk_private->window.has_raw_mouse_input) break;
-        lk_platform->mouse.middle_button.down = (message == WM_MBUTTONDOWN);
+        lk_platform->window.received_input_since_last_frame = 1;
+        if (lk_private->window.has_raw_mouse_input)
+        {
+            lk_platform->mouse.middle_button.down = (message == WM_MBUTTONDOWN);
+        }
     } break;
 
     case WM_MOUSEWHEEL:
     {
-        if (lk_private->window.has_raw_mouse_input) break;
-        lk_platform->mouse.delta_wheel += GET_WHEEL_DELTA_WPARAM(wparam) / WHEEL_DELTA;
+        lk_platform->window.received_input_since_last_frame = 1;
+        if (lk_private->window.has_raw_mouse_input)
+        {
+            lk_platform->mouse.delta_wheel += GET_WHEEL_DELTA_WPARAM(wparam) / WHEEL_DELTA;
+        }
     } break;
 
     case WM_MOUSEMOVE:
     {
         LK_S32 x = (LK_S16)(LK_U16)(lparam);
         LK_S32 y = (LK_S16)(LK_U16)(lparam >> 16);
+
+        lk_platform->window.received_input_since_last_frame = 1;
+
         if (lk_private->mouse.has_last_mousemove)
         {
             lk_platform->mouse.delta_x += x - lk_private->mouse.last_mousemove_x;
@@ -1568,6 +1596,8 @@ lk_window_callback(HWND window, UINT message, WPARAM wparam, LPARAM lparam)
     case WM_SYSKEYDOWN:
     {
         USHORT virtual_key = (USHORT) wparam;
+
+        lk_platform->window.received_input_since_last_frame = 1;
 
         if (!lk_private->window.has_raw_keyboard_input)
         {
@@ -2842,6 +2872,11 @@ static void lk_window_swap_buffers(LK_Private* lk_private, LK_Platform* lk_platf
         return;
     }
 
+    if (lk_platform->window.keep_image_from_last_frame)
+    {
+        return;
+    }
+
     if (lk_private->window.backend == LK_WINDOW_CANVAS)
     {
         LK_U32 width = lk_platform->window.width;
@@ -3546,7 +3581,10 @@ void lk_entry(LK_Client_Functions* functions)
 #endif
 
         lk_update_time_stamp(lk_private, lk_platform);
+
+        lk_platform->window.keep_image_from_last_frame = 0;
         lk_private->client.frame(lk_platform);
+        lk_platform->window.received_input_since_last_frame = 0;
 
         lk_mixer_synchronize(lk_private, lk_platform);
         lk_window_swap_buffers(lk_private, lk_platform);
