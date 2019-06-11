@@ -72,10 +72,12 @@ extern "C"
 typedef LK__REGION_CACHE_ALIGN struct
 {
     uintptr_t page_size;
-    void* page_end;
-    void* cursor;
-    void* alloc_head;
+    void*     page_end;
+    void*     cursor;
+    void*     alloc_head;
     uintptr_t alloc_count;
+    void*     next_page;
+    uintptr_t next_page_size;
 } LK__REGION_CACHE_ALIGN_POST LK_Region;
 
 /* Use this macro to initialize region variables. Like this:
@@ -83,7 +85,7 @@ typedef LK__REGION_CACHE_ALIGN struct
    If you're using C++, you can also do:
        LK_Region region = { 0 };
        LK_Region region = {}; // C++11 */
-#define LK_RegionInit { 0, 0, 0, 0 }
+#define LK_RegionInit { 0, 0, 0, 0, 0, 0, 0 }
 
 #ifdef LK_REGION_COLLECT_CALLER_INFO
 #define lk_region_alloc(...) (lk_region_alloc_(__VA_ARGS__, __FUNCTION__))
@@ -135,7 +137,7 @@ extern "C"
 #endif
 
 void* lk_region_os_alloc(size_t size, const char* caller_name);
-void lk_region_os_free(void* memory);
+void lk_region_os_free(void* memory, size_t size);
 
 #ifdef _WIN32
 /*********************************************************************************************
@@ -154,7 +156,7 @@ void* lk_region_os_alloc(size_t size, const char* caller_name)
     return VirtualAlloc(0, size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
 }
 
-void lk_region_os_free(void* memory)
+void lk_region_os_free(void* memory, size_t size)
 {
     VirtualFree(memory, 0, MEM_RELEASE);
 }
@@ -169,16 +171,23 @@ void lk_region_os_free(void* memory)
   Cross-platform
  *********************************************************************************************/
 
+typedef struct
+{
+    void*     next;
+    uintptr_t size;
+} LK_Page_Header;
+
 #ifdef LK_REGION_COLLECT_CALLER_INFO
 void* lk_region_alloc_(LK_Region* region, size_t size, size_t alignment, const char* caller_name)
 {
 #else
 void* lk_region_alloc(LK_Region* region, size_t size, size_t alignment)
 {
-    const char* caller_name = NULL;
+    const char* caller_name = 0;
 #endif
 
-    typedef uint8_t byte;
+    typedef   uint8_t byte;
+    typedef  intptr_t smm;
     typedef uintptr_t umm;
 
     /* set default page size */
@@ -193,13 +202,16 @@ void* lk_region_alloc(LK_Region* region, size_t size, size_t alignment)
     umm big_allocation_threshold = (page_size >> 2);
     if (size > big_allocation_threshold)
     {
-        if (alignment < sizeof(void*))
-            alignment = sizeof(void*);
+        if (alignment < sizeof(LK_Page_Header))
+            alignment = sizeof(LK_Page_Header);
 
-        byte* page = (byte*) lk_region_os_alloc(size + alignment, caller_name);
+        page_size = size + alignment;
+        byte* page = (byte*) lk_region_os_alloc(page_size, caller_name);
 
-        void** header = (void**) page;
-        *header = region->alloc_head;
+        LK_Page_Header* header = (LK_Page_Header*) page;
+        header->next = region->alloc_head;
+        header->size = page_size;
+
         region->alloc_head = header;
         region->alloc_count++;
 
@@ -208,37 +220,36 @@ void* lk_region_alloc(LK_Region* region, size_t size, size_t alignment)
 
     /* align cursor */
     umm cursor_address = (umm) region->cursor;
-    umm remainder = cursor_address & (umm)(alignment - 1);
-    if (remainder)
-    {
-        cursor_address += alignment - remainder;
-    }
+    cursor_address += -cursor_address & (umm)(alignment - 1);
 
     /* end of page check */
     umm end_address = cursor_address + size;
     if (end_address > (umm) region->page_end)
     {
         /* allocate another page */
-        byte* page = (byte*) lk_region_os_alloc(page_size, caller_name);
-        byte* page_end = page + page_size;
+        byte* page;
+        if (region->next_page)
+        {
+            page_size = region->next_page_size;
+            page = (byte*) region->next_page;
+            region->next_page      = 0;
+            region->next_page_size = 0;
+        }
+        else
+        {
+            page = (byte*) lk_region_os_alloc(page_size, caller_name);
+        }
 
-        void** header = (void**) page;
-        *header = region->alloc_head;
+        LK_Page_Header* header = (LK_Page_Header*) page;
+        header->next = region->alloc_head;
+        header->size = page_size;
 
-        region->page_end = page_end;
+        region->page_end = page + page_size;
         region->alloc_head = header;
         region->alloc_count++;
 
-        void* cursor = header + 1;
-
-        /* realign */
-        cursor_address = (umm) cursor;
-        remainder = cursor_address & (umm)(alignment - 1);
-        if (remainder)
-        {
-            cursor_address += alignment - remainder;
-        }
-
+        cursor_address = (umm)(header + 1);
+        cursor_address += -cursor_address & (umm)(alignment - 1);  /* realign */
         end_address = cursor_address + size;
     }
 
@@ -253,17 +264,24 @@ void lk_region_free(LK_Region* region)
     void* memory = region->alloc_head;
     while (memory)
     {
-        void** header = (void**) memory;
-        void* next_memory = *header;
+        LK_Page_Header* header = (LK_Page_Header*) memory;
+        void* next_memory = header->next;
 
-        region->alloc_count--;
-        lk_region_os_free(memory);
+        lk_region_os_free(memory, header->size);
         memory = next_memory;
     }
 
-    region->page_end = 0;
-    region->cursor = 0;
-    region->alloc_head = 0;
+    if (region->next_page)
+    {
+        lk_region_os_free(region->next_page, region->next_page_size);
+        region->next_page      = 0;
+        region->next_page_size = 0;
+    }
+
+    region->page_end    = 0;
+    region->cursor      = 0;
+    region->alloc_head  = 0;
+    region->alloc_count = 0;
 }
 
 void lk_region_cursor(LK_Region* region, LK_Region_Cursor* cursor)
@@ -282,11 +300,25 @@ void lk_region_rewind(LK_Region* region, LK_Region_Cursor* cursor)
     void* memory = region->alloc_head;
     while (memory != new_alloc_head)
     {
-        void** header = (void**) memory;
-        void* next_memory = *header;
+        LK_Page_Header* header = (LK_Page_Header*) memory;
+        void* next_memory = header->next;
 
-        region->alloc_count--;
-        lk_region_os_free(memory);
+        if (header->size > region->next_page_size)
+        {
+            if (region->next_page)
+            {
+                region->alloc_count--;
+                lk_region_os_free(region->next_page, region->next_page_size);
+            }
+            region->next_page      = memory;
+            region->next_page_size = header->size;
+        }
+        else
+        {
+            region->alloc_count--;
+            lk_region_os_free(memory, header->size);
+        }
+
         memory = next_memory;
     }
 
