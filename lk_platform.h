@@ -513,6 +513,10 @@ typedef struct LK_Platform_Structure
         LK_U64 ram_bytes;
         LK_U64 ram_kilobytes;
         LK_U64 ram_megabytes;
+
+        const char* executable_path;
+        const char* executable_directory;  // not including trailing slash
+        LK_B32 change_working_directory_to_executable_directory;  // applied after init
     } system;
 
     void* private_pointer;
@@ -558,9 +562,9 @@ extern "C"
 #endif
 
 #if !defined(_WIN32_WINNT) && !defined(WINVER)
-// Targeting Windows XP by default.
-#define _WIN32_WINNT 0x0501
-#define WINVER 0x0501
+// Targeting Windows Vista by default.
+#define _WIN32_WINNT 0x0600
+#define WINVER 0x0600
 #endif
 
 #define NOMINMAX
@@ -2054,6 +2058,11 @@ static void lk_capture_audio(LK_Audio_Context* audio, void* buffer, LK_U32 frame
 ////////////////////////////////////////////////////////////////////////////////
 // WASAPI
 
+
+#ifndef AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM
+#define AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM 0x80000000
+#endif
+
 #ifdef __cplusplus
 #define LK_COMREF(thing) (thing)
 #define LK_COMDEREF(ref) (ref)
@@ -3479,6 +3488,55 @@ static void lk_fill_system_info(LK_Platform* lk_platform)
         lk_platform->system.ram_kilobytes = memory_status.ullTotalPhys / 1024;
         lk_platform->system.ram_megabytes = memory_status.ullTotalPhys / (1024 * 1024);
     }
+
+    //
+    // get executable path
+    //
+
+    SIZE_T size = MAX_PATH + 1;
+    LPWSTR path = (LPWSTR) LocalAlloc(LMEM_FIXED, sizeof(WCHAR) * size);
+    while (path && GetModuleFileNameW(NULL, path, size) == size)
+    {
+        size *= 2;
+        LocalFree(path);
+        path = (LPWSTR) LocalAlloc(LMEM_FIXED, sizeof(WCHAR) * size);
+    }
+
+    if (path)
+    {
+        size = WideCharToMultiByte(CP_UTF8, 0, path, -1, 0, 0, 0, 0);
+        if (size)
+        {
+            char* path_utf8 = (char*) LocalAlloc(LMEM_FIXED, size);
+            if (WideCharToMultiByte(CP_UTF8, 0, path, -1, (LPSTR) path_utf8, size, 0, 0))
+            {
+                lk_platform->system.executable_path = path_utf8;
+
+                char* c = path_utf8 + size - 1;
+                while (c > path_utf8)
+                {
+                    c--;
+                    if (*c == '/' || *c == '\\')
+                        break;
+                }
+
+                SIZE_T directory_length = c - path_utf8;
+                LPSTR directory = (LPSTR) LocalAlloc(LMEM_FIXED, directory_length + 1);
+                if (directory)
+                {
+                    CopyMemory(directory, path_utf8, directory_length);
+                    directory[directory_length] = 0;
+                    lk_platform->system.executable_directory = directory;
+                }
+            }
+            else
+            {
+                LocalFree(path_utf8);
+            }
+        }
+
+        LocalFree(path);
+    }
 }
 
 
@@ -3525,6 +3583,25 @@ void lk_entry(LK_Client_Functions* functions)
     }
 
     client.functions.init(&platform);
+
+    // Maybe change working directory.
+    if (platform.system.change_working_directory_to_executable_directory)
+    {
+        LPSTR dir8 = (LPSTR) platform.system.executable_directory;
+        if (dir8)
+        {
+            SIZE_T count = MultiByteToWideChar(CP_UTF8, 0, dir8, -1, 0, 0);
+            if (count)
+            {
+                LPWSTR dir16 = (LPWSTR) LocalAlloc(LMEM_FIXED, sizeof(WCHAR) * count);
+                if (MultiByteToWideChar(CP_UTF8, 0, dir8, -1, dir16, count))
+                {
+                    SetCurrentDirectoryW(dir16);
+                }
+                LocalFree(dir16);
+            }
+        }
+    }
 
     //
     // Open the window.
