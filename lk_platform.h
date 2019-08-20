@@ -79,11 +79,43 @@ DOCUMENTATION
 #ifndef LK_PLATFORM_HEADER
 #define LK_PLATFORM_HEADER
 
+
 #ifdef __cplusplus
-#define LK_CLIENT_EXPORT extern "C" __declspec(dllexport)
+#define LK_CLIENT_EXPORT__EXTERN_C extern "C"
 #else
-#define LK_CLIENT_EXPORT __declspec(dllexport)
+#define LK_CLIENT_EXPORT__EXTERN_C
 #endif
+
+#if defined(_WIN32) || defined(__CYGWIN__)
+  #if defined(__GNUC__)
+    #define LK_CLIENT_EXPORT LK_CLIENT_EXPORT__EXTERN_C __attribute__((dllexport))
+  #else
+    #define LK_CLIENT_EXPORT LK_CLIENT_EXPORT__EXTERN_C __declspec(dllexport)
+  #endif
+#else
+  #if __GNUC__ >= 4
+    #define LK_CLIENT_EXPORT LK_CLIENT_EXPORT__EXTERN_C __attribute__((visibility("default")))
+  #else
+    #define LK_CLIENT_EXPORT LK_CLIENT_EXPORT__EXTERN_C
+  #endif
+#endif
+
+
+#if defined(_WIN32) || defined(_WIN64) || defined(__CYGWIN__)
+  #define LK_PLATFORM_OS_WINDOWS
+#elif defined(__ANDROID__)
+  #define LK_PLATFORM_OS_ANDROID
+#elif defined(__linux__)
+  #define LK_PLATFORM_OS_LINUX
+#elif defined(_AIX)
+  #include <TargetConditionals.h>
+  #if TARGET_IPHONE_SIMULATOR == 1 || TARGET_OS_IPHONE == 1
+    #define LK_PLATFORM_OS_IOS
+  #elif TARGET_OS_MAC == 1
+    #define LK_PLATFORM_OS_OSX
+  #endif
+#endif
+
 
 #ifdef __cplusplus
 extern "C"
@@ -236,6 +268,11 @@ typedef enum
 
     LK__KEY_COUNT = 256,
 } LK_Key;
+
+enum
+{
+    LK_MAX_TOUCH = 8,
+};
 
 enum
 {
@@ -420,6 +457,18 @@ typedef struct LK_Platform_Structure
 
     struct
     {
+        LK_B8 down;
+        LK_B8 pressed;
+        LK_B8 released;
+
+        float x;
+        float y;
+        float delta_x;
+        float delta_y;
+    } touch[LK_MAX_TOUCH];
+
+    struct
+    {
         LK_Digital_Button state[LK__KEY_COUNT];
         char* text; // UTF-8 formatted string.
 
@@ -539,6 +588,8 @@ typedef struct
     void(*dll_load)           (LK_Platform* platform);
     void(*dll_unload)         (LK_Platform* platform);
     int (*win32_event_handler)(LK_Platform* platform, void* window, LK_U32 message, void* wparam, void* lparam, void** out_return);
+    void(*android_low_memory) (LK_Platform* platform);
+    int (*android_back_button)(LK_Platform* platform);
 } LK_Client_Functions;
 
 void lk_entry(LK_Client_Functions* functions);
@@ -560,6 +611,12 @@ void lk_entry(LK_Client_Functions* functions);
 extern "C"
 {
 #endif
+
+
+
+#if defined(LK_PLATFORM_OS_WINDOWS)
+
+
 
 #if !defined(_WIN32_WINNT) && !defined(WINVER)
 // Targeting Windows Vista by default.
@@ -4115,6 +4172,988 @@ int main(int argc, char** argv)
     return 0;
 }
 #endif
+
+
+
+#elif defined(LK_PLATFORM_OS_ANDROID)
+
+
+
+#include <stdlib.h>
+#include <stdint.h>
+#include <string.h>
+
+#include <unistd.h>
+#include <dlfcn.h>
+#include <pthread.h>
+#include <semaphore.h>
+#include <time.h>
+
+#include <jni.h>
+#include <android/native_activity.h>
+#include <android/configuration.h>
+#include <android/looper.h>
+#include <android/log.h>
+
+#include <EGL/egl.h>
+
+#include <SLES/OpenSLES.h>
+#include <SLES/OpenSLES_Android.h>
+
+#include "lk_platform.h"
+
+
+////////////////////////////////////////////////////////////////////////////////
+// Utilities
+////////////////////////////////////////////////////////////////////////////////
+
+
+typedef int8_t  s8;
+typedef int16_t s16;
+typedef int32_t s32;
+typedef int64_t s64;
+
+typedef uint8_t  u8;
+typedef uint16_t u16;
+typedef uint32_t u32;
+typedef uint64_t u64;
+
+#define LogV(...) ((void) __android_log_print(ANDROID_LOG_VERBOSE, "native-activity", __VA_ARGS__))
+#define LogI(...) ((void) __android_log_print(ANDROID_LOG_INFO,    "native-activity", __VA_ARGS__))
+#define LogW(...) ((void) __android_log_print(ANDROID_LOG_WARN,    "native-activity", __VA_ARGS__))
+#define LogE(...) ((void) __android_log_print(ANDROID_LOG_ERROR,   "native-activity", __VA_ARGS__))
+
+static void critical(const char* message)
+{
+    LogE("Critical error: %s", message);
+    abort();
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// Pipe
+
+struct Pipe
+{
+    int read_fd;
+    int write_fd;
+};
+
+static void make_pipe(Pipe* p)
+{
+    int fd[2] = { 0 };
+    int error = pipe(fd);
+    if (error) critical("failed to create a pipe");
+    p->read_fd  = fd[0];
+    p->write_fd = fd[1];
+}
+
+static void free_pipe(Pipe* p)
+{
+    if (close(p->read_fd) || close(p->write_fd))
+        critical("failed to close a pipe");
+}
+
+static void read(Pipe* p, void* object, u32 size)
+{
+    u8* bytes = (u8*) object;
+    while (size > 0)
+    {
+        ssize_t count = read(p->read_fd, bytes, size);
+        if (count == -1 || count > size)
+            critical("failed to read from a pipe");
+        size -= count;
+        bytes += count;
+    }
+}
+
+static void write(Pipe* p, void* object, u32 size)
+{
+    u8* bytes = (u8*) object;
+    while (size > 0)
+    {
+        ssize_t count = write(p->write_fd, bytes, size);
+        if (count == -1 || count > size)
+            critical("failed to write to a pipe");
+        size -= count;
+        bytes += count;
+    }
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// Semaphore
+
+struct Semaphore
+{
+    sem_t sem;
+};
+
+static void make_semaphore(Semaphore* semaphore)
+{
+    if (sem_init(&semaphore->sem, 0, 0))
+        critical("failed to sem_init");
+}
+
+static void free_semaphore(Semaphore* semaphore)
+{
+    if (sem_destroy(&semaphore->sem))
+        critical("failed to sem_destroy");
+}
+
+static void post(Semaphore* semaphore)
+{
+    if (sem_post(&semaphore->sem))
+        critical("failed to sem_post");
+}
+
+static void wait(Semaphore* semaphore)
+{
+    if (sem_wait(&semaphore->sem))
+        critical("failed to sem_wait");
+}
+
+
+////////////////////////////////////////////////////////////////////////////////
+// Client loading
+////////////////////////////////////////////////////////////////////////////////
+
+
+#define LK_GetProc(module, destination, name)        \
+{                                                    \
+    destination = NULL;                              \
+    if (module)                                      \
+    {                                                \
+        dlerror();                                   \
+        void* proc = dlsym(module, name);            \
+        if (!dlerror())                              \
+            *(void**) &destination = proc;           \
+    }                                                \
+}
+
+
+static void lk_client_init_stub(LK_Platform* platform) {}
+static void lk_client_first_frame_stub(LK_Platform* platform) {}
+static void lk_client_frame_stub(LK_Platform* platform) {}
+static void lk_client_close_stub(LK_Platform* platform) {}
+static void lk_client_dll_load_stub(LK_Platform* platform) {}
+static void lk_client_dll_unload_stub(LK_Platform* platform) {}
+static int  lk_client_win32_event_handler_stub(LK_Platform* platform, void* window, LK_U32 message, void* wparam, void* lparam, void** out_return) { return 0; }
+static void lk_client_android_low_memory_stub(LK_Platform* platform) {}
+static int  lk_client_android_back_button_stub(LK_Platform* platform) { return 0; }
+
+static void lk_client_render_audio_stub(LK_Platform* platform, void* frames, LK_U32 frame_count)
+{
+    LK_U32 sample_size = ((platform->audio.render_sample_type == LK_AUDIO_SAMPLE_INT16) ? 2 : 4);
+    LK_U32 buffer_size = frame_count * platform->audio.render_channels * sample_size;
+    memset(frames, 0, buffer_size);
+}
+
+static void lk_client_capture_audio_stub(LK_Platform* platform, void* frames, LK_U32 frame_count) {}
+static void lk_client_log_stub(LK_Platform* platform, const char* message, const char* file, int line)
+{
+    LogE("%s (%s:%d)", message, file, line);
+}
+
+
+typedef struct
+{
+    LK_Client_Functions functions;
+    LK_Platform* platform;  // should only be used to send as argument to the client
+} LK_Client;
+
+static void lk_load_client(LK_Platform* platform, LK_Client* client)
+{
+    client->platform = platform;
+
+    void* library = dlopen(NULL, RTLD_LAZY);
+    LK_GetProc(library, client->functions.init,                "lk_client_init");
+    LK_GetProc(library, client->functions.first_frame,         "lk_client_first_frame");
+    LK_GetProc(library, client->functions.frame,               "lk_client_frame");
+    LK_GetProc(library, client->functions.close,               "lk_client_close");
+    LK_GetProc(library, client->functions.dll_load,            "lk_client_dll_load");
+    LK_GetProc(library, client->functions.dll_unload,          "lk_client_dll_unload");
+    LK_GetProc(library, client->functions.win32_event_handler, "lk_client_win32_event_handler");
+    LK_GetProc(library, client->functions.android_low_memory,  "lk_client_android_low_memory");
+    LK_GetProc(library, client->functions.android_back_button, "lk_client_android_back_button");
+    LK_GetProc(library, client->functions.render_audio,        "lk_client_render_audio");
+    LK_GetProc(library, client->functions.capture_audio,       "lk_client_capture_audio");
+    LK_GetProc(library, client->functions.log,                 "lk_client_log");
+    dlclose(library);
+
+    if (!client->functions.init)                client->functions.init                = lk_client_init_stub;
+    if (!client->functions.first_frame)         client->functions.first_frame         = lk_client_first_frame_stub;
+    if (!client->functions.frame)               client->functions.frame               = lk_client_frame_stub;
+    if (!client->functions.close)               client->functions.close               = lk_client_close_stub;
+    if (!client->functions.dll_load)            client->functions.dll_load            = lk_client_dll_load_stub;
+    if (!client->functions.dll_unload)          client->functions.dll_unload          = lk_client_dll_unload_stub;
+    if (!client->functions.win32_event_handler) client->functions.win32_event_handler = lk_client_win32_event_handler_stub;
+    if (!client->functions.android_low_memory)  client->functions.android_low_memory  = lk_client_android_low_memory_stub;
+    if (!client->functions.android_back_button) client->functions.android_back_button = lk_client_android_back_button_stub;
+    if (!client->functions.render_audio)        client->functions.render_audio        = lk_client_render_audio_stub;
+    if (!client->functions.capture_audio)       client->functions.capture_audio       = lk_client_capture_audio_stub;
+    if (!client->functions.log)                 client->functions.log                 = lk_client_log_stub;
+
+    client->functions.dll_load(platform);
+}
+
+static void lk_unload_client(LK_Platform* platform, LK_Client* client)
+{
+    client->functions.dll_unload(platform);
+}
+
+
+////////////////////////////////////////////////////////////////////////////////
+// Time
+////////////////////////////////////////////////////////////////////////////////
+
+
+typedef struct
+{
+    LK_U64 last_nanoseconds;
+    LK_U64 unprocessed_microseconds;
+    LK_U64 unprocessed_milliseconds;
+} LK_Time_Context;
+
+static LK_U64 lk_get_time_stamp()
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (LK_U64) ts.tv_sec * 1000000000 + (LK_U64) ts.tv_nsec;
+}
+
+static void lk_initialize_timer(LK_Time_Context* time)
+{
+    time->last_nanoseconds = lk_get_time_stamp();
+}
+
+static void lk_update_time_stamp(LK_Time_Context* time, LK_Platform* platform)
+{
+    LK_U64 frequency = 1000000000;
+    LK_U64 current_nanoseconds = lk_get_time_stamp();
+    LK_U64 delta_nanoseconds = current_nanoseconds - time->last_nanoseconds;
+    time->last_nanoseconds = current_nanoseconds;
+
+    LK_U64 delta;
+    platform->time.delta_ticks       = delta_nanoseconds;
+    platform->time.delta_nanoseconds = delta_nanoseconds;
+
+    delta = delta_nanoseconds + time->unprocessed_microseconds;
+    platform->time.delta_microseconds = delta / 1000;
+    time->unprocessed_microseconds = delta % 1000;
+
+    delta = delta_nanoseconds + time->unprocessed_milliseconds;
+    platform->time.delta_milliseconds = delta / 1000000;
+    time->unprocessed_milliseconds = delta % 1000000;
+
+    platform->time.delta_seconds = (LK_F64) delta_nanoseconds / 1e9;
+
+    platform->time.ticks        += delta_nanoseconds;
+    platform->time.nanoseconds  += platform->time.delta_nanoseconds;
+    platform->time.microseconds += platform->time.delta_microseconds;
+    platform->time.milliseconds += platform->time.delta_milliseconds;
+    platform->time.seconds      += platform->time.delta_seconds;
+}
+
+
+////////////////////////////////////////////////////////////////////////////////
+// OpenSLES
+////////////////////////////////////////////////////////////////////////////////
+
+
+
+struct Audio
+{
+    LK_Client* client;
+    u32 frame_rate;
+    u32 frames_per_buffer;
+    u32 num_audio_channels;
+    u32 num_buffers;
+
+    s16* audio_buffer;
+
+    SLObjectItf engine_object;
+    SLEngineItf engine;
+    SLObjectItf output_mix_object;
+    SLObjectItf player_object;
+    SLPlayItf   player;
+    SLAndroidSimpleBufferQueueItf buffer_queue;
+};
+
+static void player_callback(SLAndroidSimpleBufferQueueItf buffer_queue, void* audio_ptr)
+{
+    Audio* audio = (Audio*) audio_ptr;
+    LK_Client* client = audio->client;
+    LK_Platform* platform = client->platform;
+
+    s16* frames = audio->audio_buffer;
+    u32 frame_count   = audio->frames_per_buffer;
+    u32 channel_count = audio->num_audio_channels;
+    u32 sample_count  = frame_count * channel_count;
+
+    if (platform->audio.pause_render)
+        memset(frames, 0, sample_count * sizeof(s16));
+    else
+        client->functions.render_audio(platform, frames, frame_count);
+
+    SLresult status = (*buffer_queue)->Enqueue(buffer_queue, frames, sample_count * sizeof(s16));
+    if (status) critical("Failed to enqueue samples to OpenSL ES buffer queue.");
+}
+
+static void begin_audio(Audio* audio, LK_Platform* platform, LK_Client* client)
+{
+    audio->client = client;
+
+    audio->frame_rate         = platform->audio.render_frequency;
+    audio->frames_per_buffer  = 2000;
+    audio->num_audio_channels = platform->audio.render_channels;
+    audio->num_buffers        = 4;
+
+    audio->audio_buffer = (s16*) calloc(audio->frames_per_buffer * audio->num_audio_channels, sizeof(s16));
+
+
+    SLresult status;
+
+    // create the OpenSL engine
+    SLObjectItf engine_object;
+    SLEngineItf engine;
+    {
+        status = slCreateEngine(&engine_object, 0, NULL, 0, NULL, NULL);
+        if (status) critical("Failed to create the OpenSL ES engine.");
+        audio->engine_object = engine_object;
+
+        SLboolean async = SL_BOOLEAN_FALSE;
+        status = (*engine_object)->Realize(engine_object, async);
+        if (status) critical("Failed to realize the OpenSL ES engine.");
+
+        status = (*engine_object)->GetInterface(engine_object, SL_IID_ENGINE, &engine);
+        if (status) critical("Failed to get the OpenSL ES engine interface.");
+        audio->engine = engine;
+    }
+
+    // create the output mix
+    SLObjectItf output_mix_object;
+    {
+        status = (*engine)->CreateOutputMix(engine, &output_mix_object, 0, NULL, NULL);
+        if (status) critical("Failed to create the OpenSL ES output mix.");
+        audio->output_mix_object = output_mix_object;
+
+        SLboolean async = SL_BOOLEAN_FALSE;
+        status = (*output_mix_object)->Realize(output_mix_object, async);
+        if (status) critical("Failed to realize the OpenSL ES output mix.");
+    }
+
+    // create the OpenSL player
+    SLObjectItf player_object;
+    SLPlayItf   player;
+    SLAndroidSimpleBufferQueueItf buffer_queue;
+    {
+        // configure data source
+        SLDataLocator_AndroidSimpleBufferQueue source_locator;
+        source_locator.locatorType = SL_DATALOCATOR_ANDROIDSIMPLEBUFFERQUEUE;
+        source_locator.numBuffers  = audio->num_buffers;
+
+        SLDataFormat_PCM source_format;
+        source_format.formatType    = SL_DATAFORMAT_PCM;
+        source_format.numChannels   = audio->num_audio_channels;
+        source_format.samplesPerSec = audio->frame_rate * 1000;  // it's actually samples per 1000 seconds (in milliHz)
+        source_format.bitsPerSample = SL_PCMSAMPLEFORMAT_FIXED_16;
+        source_format.containerSize = SL_PCMSAMPLEFORMAT_FIXED_16;
+        source_format.channelMask   = (1 << audio->num_audio_channels) - 1;
+        source_format.endianness    = SL_BYTEORDER_LITTLEENDIAN;
+
+        SLDataSource source;
+        source.pLocator = &source_locator;
+        source.pFormat  = &source_format;
+
+        // configure data sink
+        SLDataLocator_OutputMix output_locator;
+        output_locator.locatorType = SL_DATALOCATOR_OUTPUTMIX;
+        output_locator.outputMix   = output_mix_object;
+
+        SLDataSink sink;
+        sink.pLocator = &output_locator;
+        sink.pFormat  = NULL;
+
+        // create and realize the player
+        SLInterfaceID interface_ids[1] = { SL_IID_ANDROIDSIMPLEBUFFERQUEUE };
+        SLboolean interface_required[1] = { SL_BOOLEAN_TRUE };
+
+        status = (*engine)->CreateAudioPlayer(engine, &player_object, &source, &sink, 1, interface_ids, interface_required);
+        if (status) critical("Failed to create the OpenSL ES player.");
+        audio->player_object = player_object;
+
+        SLboolean async = SL_BOOLEAN_FALSE;
+        status = (*player_object)->Realize(player_object, async);
+        if (status) critical("Failed to realize the OpenSL ES player.");
+
+        // get interfaces
+        status = (*player_object)->GetInterface(player_object, SL_IID_PLAY, &player);
+        if (status) critical("Failed to get the SLPlayItf from the OpenSL ES player.");
+        audio->player = player;
+
+        status = (*player_object)->GetInterface(player_object, SL_IID_ANDROIDSIMPLEBUFFERQUEUE, &buffer_queue);
+        if (status) critical("Failed to get the SLAndroidSimpleBufferQueueItf from the OpenSL ES player.");
+        audio->buffer_queue = buffer_queue;
+
+        // set the callback
+        status = (*buffer_queue)->RegisterCallback(buffer_queue, player_callback, audio);
+        if (status) critical("Failed to register the callback for OpenSL ES buffer queue.");
+    }
+
+    LogV("Created an audio player with frame rate %d, frames per buffer %d, buffers %d", audio->frame_rate, audio->frames_per_buffer, audio->num_buffers);
+
+    // play
+    status = (*player)->SetPlayState(player, SL_PLAYSTATE_PLAYING);
+    if (status) critical("Failed to set OpenSL ES play state to playing.");
+
+    for (u32 i = 0; i < audio->num_buffers; i++)
+        player_callback(buffer_queue, audio);
+}
+
+static void end_audio(Audio* audio)
+{
+    SLPlayItf player = audio->player;
+    if (player)
+    {
+        SLresult status = (*player)->SetPlayState(player, SL_PLAYSTATE_STOPPED);
+        if (status) critical("Failed to set OpenSL ES play state to stopped.");
+    }
+
+    SLObjectItf player_object = audio->player_object;
+    if (player_object) (*player_object)->Destroy(player_object);
+
+    SLObjectItf output_mix_object = audio->output_mix_object;
+    if (output_mix_object) (*output_mix_object)->Destroy(output_mix_object);
+
+    SLObjectItf engine_object = audio->engine_object;
+    if (engine_object) (*engine_object)->Destroy(engine_object);
+
+    free(audio->audio_buffer);
+
+    memset(audio, 0, sizeof(Audio));
+}
+
+
+////////////////////////////////////////////////////////////////////////////////
+// OpenGLES
+////////////////////////////////////////////////////////////////////////////////
+
+
+
+struct EGL
+{
+    EGLDisplay display;
+    EGLSurface surface;
+    EGLContext context;
+    EGLint width;
+    EGLint height;
+};
+
+static void destroy_egl_context(EGL* egl)
+{
+    if (egl->display)
+    {
+        eglMakeCurrent(egl->display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+        if (egl->context) eglDestroyContext(egl->display, egl->context);
+        if (egl->surface) eglDestroySurface(egl->display, egl->surface);
+        eglTerminate(egl->display);
+    }
+
+    memset(egl, 0, sizeof(EGL));
+}
+
+static void create_egl_context(EGL* egl, ANativeWindow* window)
+{
+    EGLDisplay display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
+    eglInitialize(display, 0, 0);
+
+    // Choose config.
+    EGLConfig config;
+    {
+        EGLint attribs[] =
+        {
+            EGL_SURFACE_TYPE, EGL_WINDOW_BIT,
+            EGL_BLUE_SIZE,  8,
+            EGL_GREEN_SIZE, 8,
+            EGL_RED_SIZE,   8,
+            EGL_NONE
+        };
+
+        EGLint count_configs;
+        eglChooseConfig(display, attribs, NULL, 0, &count_configs);
+        EGLConfig* configs = (EGLConfig*) calloc(count_configs, sizeof(EGLConfig));
+        eglChooseConfig(display, attribs, configs, count_configs, &count_configs);
+
+        for (EGLint i = 0; i < count_configs; i++)
+        {
+            EGLint r, g, b, d;
+            EGLConfig* option = &configs[i];
+            if (!eglGetConfigAttrib(display, option, EGL_RED_SIZE,   &r)) continue;
+            if (!eglGetConfigAttrib(display, option, EGL_GREEN_SIZE, &g)) continue;
+            if (!eglGetConfigAttrib(display, option, EGL_BLUE_SIZE,  &b)) continue;
+            if (!eglGetConfigAttrib(display, option, EGL_DEPTH_SIZE, &d)) continue;
+            if (r != 8 || g != 8 || b != 8 || d != 0) continue;
+            config = *option;
+            break;
+        }
+
+        free(configs);
+    }
+
+    EGLSurface surface = eglCreateWindowSurface(display, config, window, NULL);
+    EGLContext context = eglCreateContext(display, config, NULL, NULL);
+
+    if (eglMakeCurrent(display, surface, surface, context) == EGL_FALSE)
+    {
+        LogE("Unable to eglMakeCurrent");
+        return;
+    }
+
+    egl->display = display;
+    egl->surface = surface;
+    egl->context = context;
+    eglQuerySurface(display, surface, EGL_WIDTH,  &egl->width);
+    eglQuerySurface(display, surface, EGL_HEIGHT, &egl->height);
+}
+
+
+////////////////////////////////////////////////////////////////////////////////
+// Client thread
+////////////////////////////////////////////////////////////////////////////////
+
+
+// Communication structure between the activity and client threads.
+//   producer: activity thread
+//   consumer: client thread
+struct App
+{
+    pthread_t client_thread;
+
+    Pipe      activity_events;
+    Semaphore activity_response;
+
+    AAssetManager* asset_manager;
+    AInputQueue*   new_queue;
+    ANativeWindow* new_window;
+
+    void*  save_data;
+    size_t save_size;
+};
+
+enum Activity_Event: u8
+{
+    ACTIVITY_DESTROY,
+    ACTIVITY_START,
+    ACTIVITY_RESUME,
+    ACTIVITY_SAVE,
+    ACTIVITY_PAUSE,
+    ACTIVITY_STOP,
+    ACTIVITY_CONFIGURATION_UPDATED,
+    ACTIVITY_LOW_MEMORY,
+    ACTIVITY_FOCUS_GAINED,
+    ACTIVITY_FOCUS_LOST,
+    ACTIVITY_NATIVE_WINDOW_CREATED,
+    ACTIVITY_NATIVE_WINDOW_DESTROYED,
+    ACTIVITY_INPUT_QUEUE_CREATED,
+    ACTIVITY_INPUT_QUEUE_DESTROYED,
+};
+
+enum Looper_Id: int
+{
+    LOOPER_ID_ACTIVITY_EVENT,
+    LOOPER_ID_INPUT_EVENT,
+};
+
+static void* client_thread(void* app_ptr)
+{
+    App* app = (App*) app_ptr;
+
+    AAssetManager* asset_manager = app->asset_manager;
+    AConfiguration* configuration = AConfiguration_new();
+    AConfiguration_fromAssetManager(configuration, asset_manager);
+
+    ALooper* looper = ALooper_prepare(ALOOPER_PREPARE_ALLOW_NON_CALLBACKS);
+    ALooper_addFd(looper, app->activity_events.read_fd, LOOPER_ID_ACTIVITY_EVENT, ALOOPER_EVENT_INPUT, NULL, NULL);
+
+    ANativeWindow* window = NULL;
+    AInputQueue* queue = NULL;
+    post(&app->activity_response);  // let onCreate() return
+
+
+    LK_Platform platform = { 0 };
+    LK_Client client = { 0 };
+    LK_Time_Context time = { 0 };
+    Audio audio = { 0 };
+
+    bool first_frame = true;
+    int window_width  = 0;
+    int window_height = 0;
+    EGL egl = { 0 };
+
+    lk_initialize_timer(&time);
+    lk_load_client(&platform, &client);
+
+    bool is_rendering_audio = (client.functions.render_audio  != lk_client_render_audio_stub);
+    bool is_capturing_audio = (client.functions.capture_audio != lk_client_capture_audio_stub);
+
+    struct
+    {
+        LK_B32 down;
+        float x;
+        float y;
+    } touch_input[LK_MAX_TOUCH] = { 0 };
+
+
+    bool running = true;
+    while (running)
+    {
+        void* data;
+        int fd;
+        int events;
+        int ident = ALooper_pollAll(window ? 0 : -1, &fd, &events, &data);
+
+        //
+        // Handle activity events
+        //
+        if (ident == LOOPER_ID_ACTIVITY_EVENT)
+        {
+            Activity_Event event;
+            read(&app->activity_events, &event, sizeof(event));
+
+            switch (event)
+            {
+
+            case ACTIVITY_DESTROY: running = false; break;
+
+            case ACTIVITY_START:
+            {
+                lk_update_time_stamp(&time, &platform);
+                client.functions.init(&platform);
+
+                first_frame = true;
+                if (is_rendering_audio)
+                    begin_audio(&audio, &platform, &client);
+            } break;
+
+            case ACTIVITY_STOP:
+            {
+                lk_update_time_stamp(&time, &platform);
+                client.functions.close(&platform);
+                if (is_rendering_audio)
+                    end_audio(&audio);
+            } break;
+
+            case ACTIVITY_RESUME: break;
+            case ACTIVITY_PAUSE:  break;
+
+            case ACTIVITY_SAVE:
+            {
+                app->save_data = NULL;
+                app->save_size = 0;
+                post(&app->activity_response);
+            } break;
+
+            case ACTIVITY_CONFIGURATION_UPDATED:
+            {
+                AConfiguration_delete(configuration);
+                configuration = AConfiguration_new();
+                AConfiguration_fromAssetManager(configuration, asset_manager);
+            } break;
+
+            case ACTIVITY_LOW_MEMORY: client.functions.android_low_memory(&platform); break;
+
+            case ACTIVITY_FOCUS_GAINED: platform.window.has_focus = 1; break;
+            case ACTIVITY_FOCUS_LOST:   platform.window.has_focus = 0; break;
+
+            case ACTIVITY_NATIVE_WINDOW_CREATED:
+            {
+                window = app->new_window;
+                if (platform.window.backend == LK_WINDOW_OPENGL)
+                    create_egl_context(&egl, window);
+                post(&app->activity_response);
+
+                window_width  = ANativeWindow_getWidth(window);
+                window_height = ANativeWindow_getHeight(window);
+                ANativeWindow_setBuffersGeometry(window, 0, 0, AHARDWAREBUFFER_FORMAT_R8G8B8A8_UNORM);
+            } break;
+
+            case ACTIVITY_NATIVE_WINDOW_DESTROYED:
+            {
+                if (platform.window.backend == LK_WINDOW_OPENGL)
+                    destroy_egl_context(&egl);
+                window = NULL;
+                post(&app->activity_response);
+            } break;
+
+            case ACTIVITY_INPUT_QUEUE_CREATED:
+            {
+                queue = app->new_queue;
+                AInputQueue_attachLooper(queue, looper, LOOPER_ID_INPUT_EVENT, NULL, NULL);
+                post(&app->activity_response);
+            } break;
+
+            case ACTIVITY_INPUT_QUEUE_DESTROYED:
+            {
+                AInputQueue_detachLooper(queue);
+                post(&app->activity_response);
+                queue = NULL;
+                memset(touch_input, 0, sizeof(touch_input));
+            } break;
+
+            }
+        }
+        //
+        // Handle AInputQueue events
+        //
+        else if (ident == LOOPER_ID_INPUT_EVENT)
+        {
+            AInputEvent* event = NULL;
+            while (AInputQueue_getEvent(queue, &event) >= 0)
+            {
+                if (AInputQueue_preDispatchEvent(queue, event)) continue;
+                int handled = 0;
+
+                int type = AInputEvent_getType(event);
+                if (type == AINPUT_EVENT_TYPE_KEY)
+                {
+                    s32 key_code = AKeyEvent_getKeyCode(event);
+                    s32 action = AKeyEvent_getAction(event);
+
+                    if (key_code == AKEYCODE_BACK && action == AKEY_EVENT_ACTION_UP)
+                        handled = client.functions.android_back_button(&platform);
+                }
+                else if (type == AINPUT_EVENT_TYPE_MOTION)
+                {
+                    s32 action = AMotionEvent_getAction(event);
+                    s32 count = AMotionEvent_getPointerCount(event);
+                    for (s32 i = 0; i < count; i++)
+                    {
+                        s32 id = AMotionEvent_getPointerId(event, i);
+                        if (id >= LK_MAX_TOUCH) continue;
+
+                        touch_input[id].down = (action == AMOTION_EVENT_ACTION_DOWN)
+                                            || (action == AMOTION_EVENT_ACTION_POINTER_DOWN)
+                                            || (action == AMOTION_EVENT_ACTION_MOVE);
+
+                        touch_input[id].x = AMotionEvent_getX(event, i);
+                        touch_input[id].y = AMotionEvent_getY(event, i);
+                    }
+                }
+
+                AInputQueue_finishEvent(queue, event, handled);
+            }
+        }
+        //
+        // No input, so render a frame.
+        //
+        else if (window)
+        {
+            // Update window.
+            platform.window.x      = 0;
+            platform.window.y      = 0;
+            platform.window.width  = window_width;
+            platform.window.height = window_height;
+
+            if (platform.window.backend == LK_WINDOW_CANVAS)
+            {
+                platform.canvas.width  = window_width;
+                platform.canvas.height = window_height;
+                platform.canvas.data = (LK_U8*) malloc(window_width * window_height * 4);
+            }
+
+            // Update touch inputs.
+            for (s32 i = 0; i < LK_MAX_TOUCH; i++)
+            {
+                LK_B32 was_down = platform.touch[i].down;
+                LK_B32 down = touch_input[i].down;
+
+                float x      = touch_input[i].x;
+                float y      = touch_input[i].y;
+                float last_x = was_down ? platform.touch[i].x : x;
+                float last_y = was_down ? platform.touch[i].y : y;
+
+                platform.touch[i].down     =  down;
+                platform.touch[i].pressed  =  down && !was_down;
+                platform.touch[i].released = !down &&  was_down;
+                platform.touch[i].x        = x;
+                platform.touch[i].y        = y;
+                platform.touch[i].delta_x  = x - last_x;
+                platform.touch[i].delta_y  = y - last_y;
+            }
+
+            // Call the client.
+            if (first_frame)
+            {
+                first_frame = false;
+                lk_update_time_stamp(&time, &platform);
+                client.functions.first_frame(&platform);
+            }
+
+            lk_update_time_stamp(&time, &platform);
+            client.functions.frame(&platform);
+
+            // Display frame.
+            if (platform.window.backend == LK_WINDOW_CANVAS)
+            {
+                ANativeWindow_Buffer buffer;
+                if (ANativeWindow_lock(window, &buffer, NULL) == 0)
+                {
+                    int width  = platform.canvas.width;
+                    int height = platform.canvas.height;
+                    if (buffer.width  < width)  buffer.width  = width;
+                    if (buffer.height < height) buffer.height = height;
+
+                    u32* read  = (u32*) platform.canvas.data;
+                    u32* write = (u32*) buffer.bits;
+                    for (s32 y = 0; y < height; y++)
+                    {
+                        memcpy(write, read, width * 4);
+                        read  += platform.canvas.width;
+                        write += buffer.stride;
+                    }
+
+                    ANativeWindow_unlockAndPost(window);
+                }
+
+                free(platform.canvas.data);
+            }
+            else if (platform.window.backend == LK_WINDOW_OPENGL)
+            {
+                eglSwapBuffers(egl.display, egl.surface);
+            }
+        }
+    }
+
+    lk_unload_client(&platform, &client);
+    AConfiguration_delete(configuration);
+    return NULL;
+}
+
+
+////////////////////////////////////////////////////////////////////////////////
+// ANativeActivity thread
+////////////////////////////////////////////////////////////////////////////////
+
+
+static App* init_app(ANativeActivity* activity)
+{
+    App* app = (App*) calloc(1, sizeof(App));
+    make_pipe(&app->activity_events);
+    make_semaphore(&app->activity_response);
+    app->asset_manager = activity->assetManager;
+
+    pthread_attr_t attributes;
+    pthread_attr_init(&attributes);
+
+    pthread_t thread;
+    pthread_create(&thread, &attributes, client_thread, app);
+    app->client_thread = thread;
+    wait(&app->activity_response);
+
+    LogV("client created");
+
+    return app;
+}
+
+static void post_event(App* app, Activity_Event event)
+{
+    write(&app->activity_events, &event, sizeof(event));
+}
+
+static void on_destroy(ANativeActivity* activity)
+{
+    LogV("NativeActivity.onDestroy()");
+    App* app = (App*) activity->instance;
+    post_event(app, ACTIVITY_DESTROY);
+    pthread_join(app->client_thread, NULL);
+
+    free_semaphore(&app->activity_response);
+    free_pipe(&app->activity_events);
+    free(app);
+    LogV("client destroyed");
+}
+
+static void on_start                (ANativeActivity* activity)              { LogV("NativeActivity.onStart()");                post_event((App*) activity->instance, ACTIVITY_START); }
+static void on_resume               (ANativeActivity* activity)              { LogV("NativeActivity.onResume()");               post_event((App*) activity->instance, ACTIVITY_RESUME); }
+static void on_pause                (ANativeActivity* activity)              { LogV("NativeActivity.onPause()");                post_event((App*) activity->instance, ACTIVITY_PAUSE); }
+static void on_stop                 (ANativeActivity* activity)              { LogV("NativeActivity.onStop()");                 post_event((App*) activity->instance, ACTIVITY_STOP); }
+static void on_configuration_changed(ANativeActivity* activity)              { LogV("NativeActivity.onConfigurationChanged()"); post_event((App*) activity->instance, ACTIVITY_CONFIGURATION_UPDATED); }
+static void on_low_memory           (ANativeActivity* activity)              { LogV("NativeActivity.onLowMemory()");            post_event((App*) activity->instance, ACTIVITY_LOW_MEMORY); }
+static void on_window_focus_changed (ANativeActivity* activity, int focused) { LogV("NativeActivity.onWindowFocusChanged()");   post_event((App*) activity->instance, focused ? ACTIVITY_FOCUS_GAINED : ACTIVITY_FOCUS_LOST); }
+
+static void on_native_window_created(ANativeActivity* activity, ANativeWindow* window)
+{
+    LogV("NativeActivity.onNativeWindowCreated()");
+    App* app = (App*) activity->instance;
+    app->new_window = window;
+    post_event(app, ACTIVITY_NATIVE_WINDOW_CREATED);
+    wait(&app->activity_response);
+}
+
+static void on_native_window_destroyed(ANativeActivity* activity, ANativeWindow* window)
+{
+    LogV("NativeActivity.onNativeWindowDestroyed()");
+    App* app = (App*) activity->instance;
+    post_event(app, ACTIVITY_NATIVE_WINDOW_DESTROYED);
+    wait(&app->activity_response);
+}
+
+static void on_input_queue_created(ANativeActivity* activity, AInputQueue* queue)
+{
+    LogV("NativeActivity.onInputQueueCreated()");
+    App* app = (App*) activity->instance;
+    app->new_queue = queue;
+    post_event(app, ACTIVITY_INPUT_QUEUE_CREATED);
+    wait(&app->activity_response);
+}
+
+static void on_input_queue_destroyed(ANativeActivity* activity, AInputQueue* queue)
+{
+    LogV("NativeActivity.onInputQueueDestroyed()");
+    App* app = (App*) activity->instance;
+    post_event(app, ACTIVITY_INPUT_QUEUE_DESTROYED);
+    wait(&app->activity_response);
+}
+
+static void* on_save_instance_state(ANativeActivity* activity, size_t* out_size)
+{
+    LogV("NativeActivity.onSaveInstanceState()");
+    App* app = (App*) activity->instance;
+    post_event(app, ACTIVITY_SAVE);
+    wait(&app->activity_response);
+    *out_size = app->save_size;
+    return app->save_data;
+}
+
+JNIEXPORT void ANativeActivity_onCreate(ANativeActivity* activity, void* saved_state, size_t saved_state_size)
+{
+    LogV("NativeActivity.onCreate()");
+    activity->callbacks->onDestroy               = on_destroy;
+    activity->callbacks->onStart                 = on_start;
+    activity->callbacks->onResume                = on_resume;
+    activity->callbacks->onPause                 = on_pause;
+    activity->callbacks->onStop                  = on_stop;
+    activity->callbacks->onConfigurationChanged  = on_configuration_changed;
+    activity->callbacks->onLowMemory             = on_low_memory;
+    activity->callbacks->onWindowFocusChanged    = on_window_focus_changed;
+    activity->callbacks->onNativeWindowCreated   = on_native_window_created;
+    activity->callbacks->onNativeWindowDestroyed = on_native_window_destroyed;
+    activity->callbacks->onInputQueueCreated     = on_input_queue_created;
+    activity->callbacks->onInputQueueDestroyed   = on_input_queue_destroyed;
+    activity->callbacks->onSaveInstanceState     = on_save_instance_state;
+    activity->instance = init_app(activity);
+}
+
+
+#undef LogV
+#undef LogI
+#undef LogW
+#undef LogE
+
+
+
+#endif  // LK_PLATFORM_OS_*
+
+
 
 #ifdef __cplusplus
 }
