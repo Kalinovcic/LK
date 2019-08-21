@@ -4636,20 +4636,21 @@ struct LK_OpenGL_Context
     EGLContext context;
 };
 
-static void lk_create_egl_context(LK_OpenGL_Context* gl, ANativeWindow* window)
+static void lk_create_egl_context(LK_OpenGL_Context* gl, LK_Platform* platform, ANativeWindow* window)
 {
     EGLDisplay display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
     eglInitialize(display, 0, 0);
 
     // Choose config.
-    EGLConfig config = { 0 };
+    EGLConfig config = NULL;
     {
         EGLint attribs[] =
         {
             EGL_SURFACE_TYPE, EGL_WINDOW_BIT,
-            EGL_BLUE_SIZE,  8,
-            EGL_GREEN_SIZE, 8,
-            EGL_RED_SIZE,   8,
+            EGL_BUFFER_SIZE,  (EGLint) platform->opengl.color_bits,
+            EGL_DEPTH_SIZE,   (EGLint) platform->opengl.depth_bits,
+            EGL_STENCIL_SIZE, (EGLint) platform->opengl.stencil_bits,
+            EGL_SAMPLES,      (EGLint) platform->opengl.sample_count,
             EGL_NONE
         };
 
@@ -4660,27 +4661,47 @@ static void lk_create_egl_context(LK_OpenGL_Context* gl, ANativeWindow* window)
 
         for (EGLint i = 0; i < count_configs; i++)
         {
-            EGLConfig* option = &configs[i];
-            if (!config) config = *option;
+            EGLConfig option = configs[i];
+            if (!config) config = option;
 
-            EGLint r, g, b, d;
-            if (!eglGetConfigAttrib(display, option, EGL_RED_SIZE,   &r)) continue;
-            if (!eglGetConfigAttrib(display, option, EGL_GREEN_SIZE, &g)) continue;
-            if (!eglGetConfigAttrib(display, option, EGL_BLUE_SIZE,  &b)) continue;
-            if (!eglGetConfigAttrib(display, option, EGL_DEPTH_SIZE, &d)) continue;
-            if (r != 8 || g != 8 || b != 8 || d != 0) continue;
-            config = *option;
+            EGLint color_bits;
+            if (!eglGetConfigAttrib(display, option, EGL_BUFFER_SIZE, &color_bits)) continue;
+            if (color_bits != platform->opengl.color_bits) continue;
+
+            EGLint depth_bits;
+            if (!eglGetConfigAttrib(display, option, EGL_DEPTH_SIZE, &depth_bits)) continue;
+            if (depth_bits != platform->opengl.depth_bits) continue;
+
+            EGLint stencil_bits;
+            if (!eglGetConfigAttrib(display, option, EGL_STENCIL_SIZE, &stencil_bits)) continue;
+            if (stencil_bits != platform->opengl.stencil_bits) continue;
+
+            EGLint sample_count;
+            if (!eglGetConfigAttrib(display, option, EGL_SAMPLES, &sample_count)) continue;
+            if (sample_count != platform->opengl.sample_count) continue;
+
+            config = option;
             break;
         }
 
         free(configs);
     }
 
+    EGLint context_attribs[] =
+    {
+        EGL_CONTEXT_MAJOR_VERSION, (EGLint) platform->opengl.major_version,
+        EGL_CONTEXT_MINOR_VERSION, (EGLint) platform->opengl.minor_version,
+        EGL_NONE
+    };
+
     EGLSurface surface = eglCreateWindowSurface(display, config, window, NULL);
-    EGLContext context = eglCreateContext(display, config, NULL, NULL);
+    EGLContext context = eglCreateContext(display, config, NULL, context_attribs);
 
     if (eglMakeCurrent(display, surface, surface, context) == EGL_FALSE)
         lk_critical_error("Unable to eglMakeCurrent");
+
+    LK_Verbose("EGL version: %s", eglQueryString(display, EGL_VERSION));
+    LK_Verbose("EGL vendor:  %s", eglQueryString(display, EGL_VENDOR));
 
     gl->display = display;
     gl->surface = surface;
@@ -4891,6 +4912,13 @@ static void* lk_client_thread(void* activity_ptr)
             case LK_ACTIVITY_START:
             {
                 lk_update_time_stamp(&time, &platform);
+
+                platform.opengl.major_version = 2;
+                platform.opengl.minor_version = 0;
+                platform.opengl.color_bits    = 32;
+                platform.opengl.depth_bits    = 0;
+                platform.opengl.stencil_bits  = 0;
+                platform.opengl.sample_count  = 1;
                 client.functions.init(&platform);
 
                 first_frame = true;
@@ -4932,7 +4960,7 @@ static void* lk_client_thread(void* activity_ptr)
             {
                 lk_pipe_read(events, &window, sizeof(window));
                 if (platform.window.backend == LK_WINDOW_OPENGL)
-                    lk_create_egl_context(&opengl, window);
+                    lk_create_egl_context(&opengl, &platform, window);
                 lk_semaphore_post(&activity->event_sync);
 
                 window_width  = ANativeWindow_getWidth(window);
@@ -5095,6 +5123,7 @@ static void* lk_client_thread(void* activity_ptr)
             }
             else if (platform.window.backend == LK_WINDOW_OPENGL)
             {
+                eglSwapInterval(opengl.display, platform.opengl.swap_interval);
                 eglSwapBuffers(opengl.display, opengl.surface);
             }
         }
