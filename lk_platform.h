@@ -126,11 +126,11 @@ extern "C"
 #define LK_SIMPLE_TYPES
 typedef signed char  LK_S8;
 typedef signed short LK_S16;
-typedef signed long  LK_S32;
+typedef signed int   LK_S32;
 
 typedef unsigned char      LK_U8;
 typedef unsigned short     LK_U16;
-typedef unsigned long      LK_U32;
+typedef unsigned int       LK_U32;
 typedef unsigned long long LK_U64;
 
 typedef LK_U8  LK_B8;
@@ -469,6 +469,8 @@ typedef struct LK_Platform_Structure
 
     struct
     {
+        LK_B32 application_expects_input;
+
         LK_Digital_Button state[LK__KEY_COUNT];
         char* text; // UTF-8 formatted string.
 
@@ -4191,6 +4193,7 @@ int main(int argc, char** argv)
 
 #include <jni.h>
 #include <android/native_activity.h>
+#include <android/window.h>
 #include <android/configuration.h>
 #include <android/looper.h>
 #include <android/log.h>
@@ -4208,17 +4211,20 @@ int main(int argc, char** argv)
 ////////////////////////////////////////////////////////////////////////////////
 
 
-#define LK_GetProc(module, destination, name)        \
-{                                                    \
-    destination = NULL;                              \
-    if (module)                                      \
-    {                                                \
-        dlerror();                                   \
-        void* proc = dlsym(module, name);            \
-        if (!dlerror())                              \
-            *(void**) &destination = proc;           \
-    }                                                \
+#define LK_GetProc(module, destination, name)    \
+{                                                \
+    destination = NULL;                          \
+    dlerror();                                   \
+    void* proc = dlsym(module, name);            \
+    if (!dlerror())                              \
+        *(void**) &destination = proc;           \
 }
+
+#ifdef __cplusplus
+#define LK_JNI(env, what, ...) env->what(__VA_ARGS__)
+#else
+#define LK_JNI(env, what, ...) (*env)->what(env, __VA_ARGS__)
+#endif
 
 #define LK_Verbose(...) ((void) __android_log_print(ANDROID_LOG_VERBOSE, "lk_platform", __VA_ARGS__))
 
@@ -4233,6 +4239,88 @@ static void lk_semaphore_make(LK_Semaphore* semaphore) { if (sem_init   (semapho
 static void lk_semaphore_free(LK_Semaphore* semaphore) { if (sem_destroy(semaphore))       lk_critical_error("failed to sem_destroy"); }
 static void lk_semaphore_post(LK_Semaphore* semaphore) { if (sem_post   (semaphore))       lk_critical_error("failed to sem_post");    }
 static void lk_semaphore_wait(LK_Semaphore* semaphore) { if (sem_wait   (semaphore))       lk_critical_error("failed to sem_wait");    }
+
+
+////////////////////////////////////////////////////////////////////////////////
+// LK_Pipe
+
+struct LK_Pipe
+{
+    ALooper* looper;
+    int read_fd;
+    int write_fd;
+};
+
+static void lk_pipe_attach_looper(LK_Pipe* p, ALooper* looper, int id)
+{
+    p->looper = looper;
+    ALooper_acquire(looper);
+    ALooper_addFd(looper, p->read_fd, id, ALOOPER_EVENT_INPUT, NULL, NULL);
+}
+
+static void lk_pipe_attach_looper_callback(LK_Pipe* p, ALooper* looper, ALooper_callbackFunc callback, void* data)
+{
+    p->looper = looper;
+    ALooper_acquire(looper);
+    ALooper_addFd(looper, p->read_fd, ALOOPER_POLL_CALLBACK, ALOOPER_EVENT_INPUT, callback, data);
+}
+
+static void lk_pipe_detach_looper(LK_Pipe* p)
+{
+    ALooper_removeFd(p->looper, p->read_fd);
+    ALooper_release(p->looper);
+    p->looper = NULL;
+}
+
+static void lk_pipe_make(LK_Pipe* p)
+{
+    int fd[2];
+    if (pipe(fd)) lk_critical_error("failed to create a pipe");
+    p->read_fd  = fd[0];
+    p->write_fd = fd[1];
+}
+
+static void lk_pipe_free(LK_Pipe* p)
+{
+    if (p->looper) lk_pipe_detach_looper(p);
+    close(p->read_fd);
+    close(p->write_fd);
+}
+
+static void lk_pipe_read(LK_Pipe* p, void* object, size_t size)
+{
+    if (read(p->read_fd, object, size) != size)
+        lk_critical_error("failed to read from the async UI call pipe");
+}
+
+static void lk_pipe_write(LK_Pipe* p, void* object, size_t size)
+{
+    if (write(p->write_fd, object, size) != size)
+        lk_critical_error("failed to read from the async UI call pipe");
+}
+
+
+typedef void LK_Async_Callback(LK_Pipe* pipe);
+
+static int lk_run_async_call(int fd, int events, void* pipe_ptr)
+{
+    LK_Pipe* pipe = (LK_Pipe*) pipe_ptr;
+    LK_Async_Callback* call;
+    lk_pipe_read(pipe, &call, sizeof(call));
+    call(pipe);
+    return 1;
+}
+
+static void lk_pipe_make_async_executor(LK_Pipe* p)
+{
+    lk_pipe_make(p);
+    lk_pipe_attach_looper_callback(p, ALooper_forThread(), lk_run_async_call, p);
+}
+
+static void lk_pipe_async_call(LK_Pipe* p, LK_Async_Callback* call)
+{
+    lk_pipe_write(p, &call, sizeof(call));
+}
 
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -4273,7 +4361,7 @@ static void lk_load_client(LK_Platform* platform, LK_Client* client)
 {
     client->platform = platform;
 
-    void* library = dlopen(NULL, RTLD_LAZY);
+    void* library = RTLD_DEFAULT;
     LK_GetProc(library, client->functions.init,                "lk_client_init");
     LK_GetProc(library, client->functions.first_frame,         "lk_client_first_frame");
     LK_GetProc(library, client->functions.frame,               "lk_client_frame");
@@ -4285,7 +4373,6 @@ static void lk_load_client(LK_Platform* platform, LK_Client* client)
     LK_GetProc(library, client->functions.render_audio,        "lk_client_render_audio");
     LK_GetProc(library, client->functions.capture_audio,       "lk_client_capture_audio");
     LK_GetProc(library, client->functions.log,                 "lk_client_log");
-    dlclose(library);
 
     if (!client->functions.init)                client->functions.init                = lk_client_init_stub;
     if (!client->functions.first_frame)         client->functions.first_frame         = lk_client_first_frame_stub;
@@ -4364,7 +4451,6 @@ static void lk_update_time_stamp(LK_Time_Context* time, LK_Platform* platform)
 ////////////////////////////////////////////////////////////////////////////////
 // OpenSLES
 ////////////////////////////////////////////////////////////////////////////////
-
 
 
 struct LK_Audio_Context
@@ -4506,8 +4592,6 @@ static void lk_begin_audio(LK_Audio_Context* audio, LK_Platform* platform, LK_Cl
         if (status) lk_critical_error("Failed to register the callback for OpenSL ES buffer queue.");
     }
 
-    LK_Verbose("Created an audio player with frame rate %lu, frames per buffer %lu, buffers %lu", audio->frame_rate, audio->frames_per_buffer, audio->num_buffers);
-
     // play
     status = (*player)->SetPlayState(player, SL_PLAYSTATE_PLAYING);
     if (status) lk_critical_error("Failed to set OpenSL ES play state to playing.");
@@ -4545,7 +4629,6 @@ static void lk_end_audio(LK_Audio_Context* audio)
 ////////////////////////////////////////////////////////////////////////////////
 
 
-
 struct LK_OpenGL_Context
 {
     EGLDisplay display;
@@ -4559,7 +4642,7 @@ static void lk_create_egl_context(LK_OpenGL_Context* gl, ANativeWindow* window)
     eglInitialize(display, 0, 0);
 
     // Choose config.
-    EGLConfig config;
+    EGLConfig config = { 0 };
     {
         EGLint attribs[] =
         {
@@ -4577,8 +4660,10 @@ static void lk_create_egl_context(LK_OpenGL_Context* gl, ANativeWindow* window)
 
         for (EGLint i = 0; i < count_configs; i++)
         {
-            EGLint r, g, b, d;
             EGLConfig* option = &configs[i];
+            if (!config) config = *option;
+
+            EGLint r, g, b, d;
             if (!eglGetConfigAttrib(display, option, EGL_RED_SIZE,   &r)) continue;
             if (!eglGetConfigAttrib(display, option, EGL_GREEN_SIZE, &g)) continue;
             if (!eglGetConfigAttrib(display, option, EGL_BLUE_SIZE,  &b)) continue;
@@ -4617,28 +4702,71 @@ static void lk_destroy_egl_context(LK_OpenGL_Context* gl)
 
 
 ////////////////////////////////////////////////////////////////////////////////
+// Software keyboard control
+////////////////////////////////////////////////////////////////////////////////
+
+
+static void lk_async_set_software_keyboard_visibility(LK_Pipe* pipe)
+{
+    ANativeActivity* activity;
+    LK_B32 visible;
+    lk_pipe_read(pipe, &activity, sizeof(activity));
+    lk_pipe_read(pipe, &visible, sizeof(visible));
+
+    JNIEnv* env = activity->env;
+    jobject native_activity = activity->clazz;
+
+    // android.app.NativeActivity
+    jclass    NativeActivity   = env->GetObjectClass(native_activity);
+    jmethodID getSystemService = env->GetMethodID(NativeActivity, "getSystemService", "(Ljava/lang/String;)Ljava/lang/Object;");
+    jmethodID getWindow        = env->GetMethodID(NativeActivity, "getWindow", "()Landroid/view/Window;");
+
+    // android.view.Window
+    jclass    Window       = env->FindClass("android/view/Window");
+    jmethodID getDecorView = env->GetMethodID(Window, "getDecorView", "()Landroid/view/View;");
+
+    // android.view.View
+    jclass    View           = env->FindClass("android/view/View");
+    jmethodID getWindowToken = env->GetMethodID(View, "getWindowToken", "()Landroid/os/IBinder;");
+
+    // android.view.inputmethod.InputMethodManager
+    jclass    InputMethodManager      = env->FindClass("android/view/inputmethod/InputMethodManager");
+    jmethodID showSoftInput           = env->GetMethodID(InputMethodManager, "showSoftInput", "(Landroid/view/View;I)Z");
+    jmethodID hideSoftInputFromWindow = env->GetMethodID(InputMethodManager, "hideSoftInputFromWindow", "(Landroid/os/IBinder;I)Z");
+
+
+    jstring INPUT_METHOD_SERVICE = env->NewStringUTF("input_method");
+    jobject input_method_manager = env->CallObjectMethod(native_activity, getSystemService, INPUT_METHOD_SERVICE);
+    jobject window = env->CallObjectMethod(native_activity, getWindow);
+    jobject decor_view = env->CallObjectMethod(window, getDecorView);
+
+    if (visible)
+    {
+        env->CallBooleanMethod(input_method_manager, showSoftInput, decor_view, 0);
+    }
+    else
+    {
+        jobject binder = env->CallObjectMethod(decor_view, getWindowToken);
+        env->CallBooleanMethod(input_method_manager, hideSoftInputFromWindow, binder, 0);
+    }
+}
+
+static void lk_set_software_keyboard_visibility(LK_Pipe* async_executor, ANativeActivity* activity, LK_B32 visible)
+{
+    lk_pipe_async_call(async_executor, lk_async_set_software_keyboard_visibility);
+    lk_pipe_write(async_executor, &activity, sizeof(activity));
+    lk_pipe_write(async_executor, &visible, sizeof(visible));
+}
+
+
+////////////////////////////////////////////////////////////////////////////////
 // Client thread
 ////////////////////////////////////////////////////////////////////////////////
 
 
-struct LK_Activity_Context
+enum LK_UI_Event: LK_U8
 {
-    pthread_t thread;
-
-    int event_read_fd;
-    int event_write_fd;
-    LK_Semaphore event_sync;
-
-    AAssetManager* asset_manager;
-    AInputQueue*   new_queue;
-    ANativeWindow* new_window;
-
-    void*  save_data;
-    size_t save_size;
-};
-
-enum LK_Activity_Event: LK_U8
-{
+    LK_UNKNOWN_UI_EVENT,
     LK_ACTIVITY_DESTROY,
     LK_ACTIVITY_START,
     LK_ACTIVITY_RESUME,
@@ -4651,28 +4779,64 @@ enum LK_Activity_Event: LK_U8
     LK_ACTIVITY_FOCUS_LOST,
     LK_ACTIVITY_NATIVE_WINDOW_CREATED,
     LK_ACTIVITY_NATIVE_WINDOW_DESTROYED,
-    LK_ACTIVITY_INPUT_QUEUE_CREATED,
-    LK_ACTIVITY_INPUT_QUEUE_DESTROYED,
+    LK_INPUT_KEY,
+    LK_INPUT_TEXT,
+    LK_INPUT_TOUCH,
+};
+
+struct LK_Input_Key
+{
+    LK_S8 down;
+    LK_Key key;
+};
+
+struct LK_Input_Text
+{
+    char utf8[8];
+};
+
+struct LK_Input_Touch
+{
+    LK_S8  down;
+    LK_S8  up;
+    LK_S32 pointer_id;
+    float  x;
+    float  y;
+};
+
+
+struct LK_Activity_Context
+{
+    pthread_t thread;
+
+    LK_Semaphore event_sync;
+    LK_Pipe events;          // UI thread writes to this to inform the client thread of changes
+    LK_Pipe async_executor;  // callbacks run on UI thread
+    ALooper* client_looper;
+
+    ANativeActivity* native_activity;
+    AAssetManager* asset_manager;
+
+    void*  save_data;
+    size_t save_size;
 };
 
 static void* lk_client_thread(void* activity_ptr)
 {
+    LK_Verbose("lk_client_thread");
     LK_Activity_Context* activity = (LK_Activity_Context*) activity_ptr;
 
     AAssetManager* asset_manager = activity->asset_manager;
     AConfiguration* configuration = AConfiguration_new();
     AConfiguration_fromAssetManager(configuration, asset_manager);
 
-    enum
-    {
-        LOOPER_ID_ACTIVITY_EVENT,
-        LOOPER_ID_INPUT_EVENT,
-    };
+    LK_Pipe* events = &activity->events;
 
+    enum { LOOPER_ID_UI_EVENT };
     ALooper* looper = ALooper_prepare(ALOOPER_PREPARE_ALLOW_NON_CALLBACKS);
-    ALooper_addFd(looper, activity->event_read_fd, LOOPER_ID_ACTIVITY_EVENT, ALOOPER_EVENT_INPUT, NULL, NULL);
+    lk_pipe_attach_looper(events, looper, LOOPER_ID_UI_EVENT);
+    activity->client_looper = looper;
 
-    AInputQueue* queue = NULL;
     lk_semaphore_post(&activity->event_sync);  // let onCreate() return
 
 
@@ -4700,24 +4864,24 @@ static void* lk_client_thread(void* activity_ptr)
         float y;
     } touch_input[LK_MAX_TOUCH] = { 0 };
 
+    LK_B32 keyboard_is_shown = 0;
+
 
     LK_B32 running = true;
     while (running)
     {
         void* data;
         int fd;
-        int events;
-        int ident = ALooper_pollAll(window ? 0 : -1, &fd, &events, &data);
+        int fd_events;
+        int ident = ALooper_pollAll(window ? 0 : -1, &fd, &fd_events, &data);
 
         //
         // Handle activity events
         //
-        if (ident == LOOPER_ID_ACTIVITY_EVENT)
+        if (ident == LOOPER_ID_UI_EVENT)
         {
-            LK_Activity_Event event;
-            ssize_t count = read(activity->event_read_fd, &event, sizeof(event));
-            if (count != sizeof(event))
-                lk_critical_error("failed to read from the activity event pipe");
+            LK_UI_Event event;
+            lk_pipe_read(events, &event, sizeof(event));
 
             switch (event)
             {
@@ -4766,7 +4930,7 @@ static void* lk_client_thread(void* activity_ptr)
 
             case LK_ACTIVITY_NATIVE_WINDOW_CREATED:
             {
-                window = activity->new_window;
+                lk_pipe_read(events, &window, sizeof(window));
                 if (platform.window.backend == LK_WINDOW_OPENGL)
                     lk_create_egl_context(&opengl, window);
                 lk_semaphore_post(&activity->event_sync);
@@ -4784,62 +4948,41 @@ static void* lk_client_thread(void* activity_ptr)
                 lk_semaphore_post(&activity->event_sync);
             } break;
 
-            case LK_ACTIVITY_INPUT_QUEUE_CREATED:
+            case LK_INPUT_KEY:
             {
-                queue = activity->new_queue;
-                AInputQueue_attachLooper(queue, looper, LOOPER_ID_INPUT_EVENT, NULL, NULL);
-                lk_semaphore_post(&activity->event_sync);
+                LK_Input_Key input;
+                lk_pipe_read(events, &input, sizeof(input));
+
+                if (input.down)
+                {
+                    platform.keyboard.state[input.key].pressed = 1;
+                    platform.keyboard.state[input.key].down = 1;
+                }
+                else
+                {
+                    platform.keyboard.state[input.key].released = 1;
+                    platform.keyboard.state[input.key].down = 0;
+                }
             } break;
 
-            case LK_ACTIVITY_INPUT_QUEUE_DESTROYED:
+            case LK_INPUT_TEXT:
             {
-                AInputQueue_detachLooper(queue);
-                lk_semaphore_post(&activity->event_sync);
-                queue = NULL;
-                memset(touch_input, 0, sizeof(touch_input));
+                LK_Input_Text input;
+                lk_pipe_read(events, &input, sizeof(input));
             } break;
 
-            }
-        }
-        //
-        // Handle AInputQueue events
-        //
-        else if (ident == LOOPER_ID_INPUT_EVENT)
-        {
-            AInputEvent* event = NULL;
-            while (AInputQueue_getEvent(queue, &event) >= 0)
+            case LK_INPUT_TOUCH:
             {
-                if (AInputQueue_preDispatchEvent(queue, event)) continue;
-                int handled = 0;
+                LK_Input_Touch input;
+                lk_pipe_read(events, &input, sizeof(input));
 
-                int type = AInputEvent_getType(event);
-                if (type == AINPUT_EVENT_TYPE_KEY)
-                {
-                    LK_S32 key_code = AKeyEvent_getKeyCode(event);
-                    LK_S32 action = AKeyEvent_getAction(event);
+                if (input.down) touch_input[input.pointer_id].down = 1;
+                if (input.up)   touch_input[input.pointer_id].down = 0;
+                touch_input[input.pointer_id].x = input.x;
+                touch_input[input.pointer_id].y = input.y;
+            } break;
 
-                    if (key_code == AKEYCODE_BACK && action == AKEY_EVENT_ACTION_UP)
-                        handled = client.functions.android_back_button(&platform);
-                }
-                else if (type == AINPUT_EVENT_TYPE_MOTION)
-                {
-                    LK_S32 action = AMotionEvent_getAction(event);
-                    LK_S32 count = AMotionEvent_getPointerCount(event);
-                    for (LK_S32 i = 0; i < count; i++)
-                    {
-                        LK_S32 id = AMotionEvent_getPointerId(event, i);
-                        if (id >= LK_MAX_TOUCH) continue;
-
-                        touch_input[id].down = (action == AMOTION_EVENT_ACTION_DOWN)
-                                            || (action == AMOTION_EVENT_ACTION_POINTER_DOWN)
-                                            || (action == AMOTION_EVENT_ACTION_MOVE);
-
-                        touch_input[id].x = AMotionEvent_getX(event, i);
-                        touch_input[id].y = AMotionEvent_getY(event, i);
-                    }
-                }
-
-                AInputQueue_finishEvent(queue, event, handled);
+            default: lk_critical_error("processing unknown UI event");
             }
         }
         //
@@ -4859,6 +5002,11 @@ static void* lk_client_thread(void* activity_ptr)
                 platform.canvas.height = window_height;
                 platform.canvas.data = (LK_U8*) malloc(window_width * window_height * 4);
             }
+
+            if (platform.window.fullscreen)
+                ANativeActivity_setWindowFlags(activity->native_activity, AWINDOW_FLAG_FULLSCREEN, 0);
+            else
+                ANativeActivity_setWindowFlags(activity->native_activity, 0, AWINDOW_FLAG_FULLSCREEN);
 
             // Update touch inputs.
             for (int i = 0; i < LK_MAX_TOUCH; i++)
@@ -4880,6 +5028,21 @@ static void* lk_client_thread(void* activity_ptr)
                 platform.touch[i].delta_y  = y - last_y;
             }
 
+            // Update keyboard state.
+            if (platform.window.has_focus)
+            {
+                if (platform.keyboard.application_expects_input != keyboard_is_shown)
+                {
+                    keyboard_is_shown = platform.keyboard.application_expects_input;
+                    lk_set_software_keyboard_visibility(&activity->async_executor, activity->native_activity, keyboard_is_shown);
+                }
+            }
+            else if (keyboard_is_shown)
+            {
+                keyboard_is_shown = false;
+                lk_set_software_keyboard_visibility(&activity->async_executor, activity->native_activity, keyboard_is_shown);
+            }
+
             // Call the client.
             if (first_frame)
             {
@@ -4891,6 +5054,13 @@ static void* lk_client_thread(void* activity_ptr)
             lk_update_time_stamp(&time, &platform);
             client.functions.frame(&platform);
 
+            // Clear keyboard pressed/released flags.
+            for (int i = 0; i < LK__KEY_COUNT; i++)
+            {
+                platform.keyboard.state[i].pressed  = 0;
+                platform.keyboard.state[i].released = 0;
+            }
+
             // Display frame.
             if (platform.window.backend == LK_WINDOW_CANVAS)
             {
@@ -4899,8 +5069,8 @@ static void* lk_client_thread(void* activity_ptr)
                 {
                     LK_U32 width  = platform.canvas.width;
                     LK_U32 height = platform.canvas.height;
-                    if (buffer.width  < width)  buffer.width  = width;
-                    if (buffer.height < height) buffer.height = height;
+                    if (buffer.width  < width)  width  = buffer.width;
+                    if (buffer.height < height) height = buffer.height;
 
                     LK_U32* read  = (LK_U32*) platform.canvas.data;
                     LK_U32* write = (LK_U32*) buffer.bits;
@@ -4932,7 +5102,277 @@ static void* lk_client_thread(void* activity_ptr)
 
     lk_unload_client(&platform, &client);
     AConfiguration_delete(configuration);
+
+    lk_pipe_detach_looper(events);
+    ALooper_release(looper);
     return NULL;
+}
+
+
+////////////////////////////////////////////////////////////////////////////////
+// LK_Input_Queue
+////////////////////////////////////////////////////////////////////////////////
+
+
+struct LK_Input_Queue
+{
+    jobject object;  // android.view.InputQueue
+    jmethodID finishInputEvent;
+
+    LK_Pipe* events;
+    LK_Pipe async_executor;
+    jlong next_id;
+};
+
+static jlong lk_input_queue_nativeInit(JNIEnv* env, jobject clazz, jobject queue_weak_reference, jobject message_queue)
+{
+    LK_Input_Queue* queue = (LK_Input_Queue*) calloc(1, sizeof(LK_Input_Queue));
+
+    jclass WeakReference = env->GetObjectClass(queue_weak_reference);
+    jmethodID get = env->GetMethodID(WeakReference, "get", "()Ljava/lang/Object;");
+    jobject queue_object = env->CallObjectMethod(queue_weak_reference, get);
+
+    jclass InputQueue = env->GetObjectClass(queue_object);
+    queue->object = env->NewGlobalRef(queue_object);
+    queue->finishInputEvent = env->GetMethodID(InputQueue, "finishInputEvent", "(JZ)V");
+
+    lk_pipe_make_async_executor(&queue->async_executor);
+    queue->next_id = 1;
+
+    return (jlong) queue;
+}
+
+static void lk_input_queue_nativeDispose(JNIEnv* env, jobject clazz, jlong queue_ptr)
+{
+    LK_Input_Queue* queue = (LK_Input_Queue*) queue_ptr;
+    lk_pipe_free(&queue->async_executor);
+    env->DeleteGlobalRef(queue->object);
+    free(queue);
+}
+
+static void lk_input_queue_async_finishInputEvent(LK_Pipe* pipe)
+{
+    JNIEnv* env;
+    LK_Input_Queue* queue;
+    jlong id;
+
+    lk_pipe_read(pipe, &env, sizeof(env));
+    lk_pipe_read(pipe, &queue, sizeof(queue));
+    lk_pipe_read(pipe, &id, sizeof(id));
+
+    jboolean handled = 0;
+    env->CallVoidMethod(queue->object, queue->finishInputEvent, (jlong) id, handled);
+}
+
+static jlong lk_input_queue_schedule_event_respnose(LK_Input_Queue* queue, JNIEnv* env)
+{
+    jlong id = queue->next_id++;
+    LK_Pipe* pipe = &queue->async_executor;
+    lk_pipe_async_call(pipe, lk_input_queue_async_finishInputEvent);
+    lk_pipe_write(pipe, &env, sizeof(env));
+    lk_pipe_write(pipe, &queue, sizeof(queue));
+    lk_pipe_write(pipe, &id, sizeof(id));
+    return id;
+}
+
+static void lk_input_queue_post_event(LK_Input_Queue* queue, LK_UI_Event kind, void* object, size_t size)
+{
+    LK_Pipe* pipe = queue->events;
+    if (!pipe) return;
+    lk_pipe_write(pipe, &kind, sizeof(LK_UI_Event));
+    lk_pipe_write(pipe, object, size);
+}
+
+static void lk_input_queue_post_text_event(LK_Input_Queue* queue, int code_point)
+{
+    if (!code_point) return;
+
+    LK_Input_Text input;
+    LK_U8* target = (LK_U8*) input.utf8;
+
+    int length;
+         if (code_point <      0x80) length = 1;
+    else if (code_point <     0x800) length = 2;
+    else if (code_point <   0x10000) length = 3;
+    else if (code_point <  0x200000) length = 4;
+    else if (code_point < 0x4000000) length = 5;
+    else                             length = 6;
+
+    target[length] = 0;
+    switch (length)
+    {
+    case 6:  target[5] = (LK_U8)((code_point | 0x80) & 0xBF); code_point >>= 6;  // fall-through
+    case 5:  target[4] = (LK_U8)((code_point | 0x80) & 0xBF); code_point >>= 6;  // fall-through
+    case 4:  target[3] = (LK_U8)((code_point | 0x80) & 0xBF); code_point >>= 6;  // fall-through
+    case 3:  target[2] = (LK_U8)((code_point | 0x80) & 0xBF); code_point >>= 6;  // fall-through
+    case 2:  target[1] = (LK_U8)((code_point | 0x80) & 0xBF); code_point >>= 6;  // fall-through
+    }
+
+    static const LK_U8 FIRST_MASK[7] = { 0x00, 0x00, 0xC0, 0xE0, 0xF0, 0xF8, 0xFC };
+    target[0] = (LK_U8)(code_point | FIRST_MASK[length]);
+
+    lk_input_queue_post_event(queue, LK_INPUT_TEXT, &input, sizeof(input));
+}
+
+static jlong lk_input_queue_nativeSendKeyEvent(JNIEnv* env, jobject clazz, jlong queue_ptr, jobject event_object, jboolean predispatch)
+{
+    LK_Input_Queue* queue = (LK_Input_Queue*) queue_ptr;
+    if (predispatch)
+        return lk_input_queue_schedule_event_respnose(queue, env);
+
+    static jclass    KeyEvent        = env->FindClass("android/view/KeyEvent");
+    static jmethodID getAction       = env->GetMethodID(KeyEvent, "getAction", "()I");
+    static jmethodID getKeyCode      = env->GetMethodID(KeyEvent, "getKeyCode", "()I");
+    static jmethodID getCharacters   = env->GetMethodID(KeyEvent, "getCharacters", "()Ljava/lang/String;");
+    static jmethodID getUnicodeChar  = env->GetMethodID(KeyEvent, "getUnicodeChar", "()I");
+    static jmethodID getDisplayLabel = env->GetMethodID(KeyEvent, "getDisplayLabel", "()C");
+
+    const int ACTION_DOWN     = 0;
+    const int ACTION_UP       = 1;
+    const int ACTION_MULTIPLE = 2;
+
+    int action   = env->CallIntMethod(event_object, getAction);
+    int key_code = env->CallIntMethod(event_object, getKeyCode);
+
+    // translate Android keycode to LK_Key
+    LK_Key lk_key = (LK_Key) 0;
+         if (key_code >= AKEYCODE_0 && key_code <= AKEYCODE_9) lk_key = (LK_Key)(LK_KEY_0 + key_code - AKEYCODE_0);
+    else if (key_code >= AKEYCODE_A && key_code <= AKEYCODE_Z) lk_key = (LK_Key)(LK_KEY_A + key_code - AKEYCODE_A);
+    else if (key_code == AKEYCODE_DEL)         lk_key = LK_KEY_BACKSPACE;
+    else if (key_code == AKEYCODE_TAB)         lk_key = LK_KEY_TAB;
+    else if (key_code == AKEYCODE_ENTER)       lk_key = LK_KEY_ENTER;
+    else if (key_code == AKEYCODE_ESCAPE)      lk_key = LK_KEY_ESCAPE;
+    else if (key_code == AKEYCODE_SPACE)       lk_key = LK_KEY_SPACE;
+    else if (key_code == AKEYCODE_COMMA)       lk_key = LK_KEY_COMMA;
+    else if (key_code == AKEYCODE_PERIOD)      lk_key = LK_KEY_PERIOD;
+    else if (key_code == AKEYCODE_GRAVE)       lk_key = LK_KEY_GRAVE;
+    else if (key_code == AKEYCODE_FORWARD_DEL) lk_key = LK_KEY_DELETE;
+    else if (key_code >= AKEYCODE_F1 && key_code <= AKEYCODE_F12) lk_key = (LK_Key)(LK_KEY_F1 + key_code - AKEYCODE_F1);
+    else if (key_code == AKEYCODE_CAPS_LOCK)   lk_key = LK_KEY_CAPS_LOCK;
+    else if (key_code == AKEYCODE_SHIFT_LEFT)  lk_key = LK_KEY_LEFT_SHIFT;
+    else if (key_code == AKEYCODE_CTRL_LEFT)   lk_key = LK_KEY_LEFT_CONTROL;
+    else if (key_code == AKEYCODE_META_LEFT)   lk_key = LK_KEY_LEFT_WINDOWS;
+    else if (key_code == AKEYCODE_ALT_LEFT)    lk_key = LK_KEY_LEFT_ALT;
+    else if (key_code == AKEYCODE_SHIFT_RIGHT) lk_key = LK_KEY_RIGHT_SHIFT;
+    else if (key_code == AKEYCODE_CTRL_RIGHT)  lk_key = LK_KEY_RIGHT_CONTROL;
+    else if (key_code == AKEYCODE_META_RIGHT)  lk_key = LK_KEY_RIGHT_WINDOWS;
+    else if (key_code == AKEYCODE_ALT_RIGHT)   lk_key = LK_KEY_RIGHT_ALT;
+    else if (key_code == AKEYCODE_SYSRQ)       lk_key = LK_KEY_PRINT_SCREEN;
+    else if (key_code == AKEYCODE_SCROLL_LOCK) lk_key = LK_KEY_SCREEN_LOCK;
+    else if (key_code == AKEYCODE_BREAK)       lk_key = LK_KEY_PAUSE;
+    else if (key_code == AKEYCODE_INSERT)      lk_key = LK_KEY_INSERT;
+    else if (key_code == AKEYCODE_PAGE_UP)     lk_key = LK_KEY_PAGE_UP;
+    else if (key_code == AKEYCODE_PAGE_DOWN)   lk_key = LK_KEY_PAGE_DOWN;
+    else if (key_code == AKEYCODE_DPAD_LEFT)   lk_key = LK_KEY_ARROW_LEFT;
+    else if (key_code == AKEYCODE_DPAD_RIGHT)  lk_key = LK_KEY_ARROW_RIGHT;
+    else if (key_code == AKEYCODE_DPAD_UP)     lk_key = LK_KEY_ARROW_UP;
+    else if (key_code == AKEYCODE_DPAD_DOWN)   lk_key = LK_KEY_ARROW_DOWN;
+    else if (key_code == AKEYCODE_NUM_LOCK)    lk_key = LK_KEY_NUMLOCK;
+    else if (key_code >= AKEYCODE_NUMPAD_0 && key_code <= AKEYCODE_NUMPAD_9) lk_key = (LK_Key)(LK_KEY_NUMPAD_0 + key_code - AKEYCODE_NUMPAD_0);
+    else if (key_code == AKEYCODE_NUMPAD_DIVIDE)   lk_key = LK_KEY_NUMPAD_DIVIDE;
+    else if (key_code == AKEYCODE_NUMPAD_MULTIPLY) lk_key = LK_KEY_NUMPAD_MULTIPLY;
+    else if (key_code == AKEYCODE_NUMPAD_SUBTRACT) lk_key = LK_KEY_NUMPAD_MINUS;
+    else if (key_code == AKEYCODE_NUMPAD_ADD)      lk_key = LK_KEY_NUMPAD_PLUS;
+    else if (key_code == AKEYCODE_NUMPAD_DOT)      lk_key = LK_KEY_NUMPAD_PERIOD;
+    else if (key_code == AKEYCODE_NUMPAD_ENTER)    lk_key = LK_KEY_NUMPAD_ENTER;
+
+    // if we recognize the key, post a key event
+    if (lk_key)
+    {
+        LK_Input_Key input;
+        input.down = (action == ACTION_DOWN || action == ACTION_MULTIPLE);
+        input.key = lk_key;
+        lk_input_queue_post_event(queue, LK_INPUT_KEY, &input, sizeof(input));
+    }
+
+    // maybe post text events
+    if (action == ACTION_DOWN)
+    {
+        int code_point = env->CallIntMethod(event_object, getUnicodeChar);
+        if (!code_point)
+            code_point = env->CallCharMethod(event_object, getDisplayLabel);
+        lk_input_queue_post_text_event(queue, code_point);
+    }
+    else if (action == ACTION_MULTIPLE)
+    {
+        jstring characters = (jstring) env->CallObjectMethod(event_object, getCharacters);
+
+        static jclass    String      = env->GetObjectClass(characters);
+        static jmethodID length      = env->GetMethodID(String, "length", "()I");
+        static jmethodID codePointAt = env->GetMethodID(String, "codePointAt", "(I)I");
+
+        int count_chars = env->CallIntMethod(characters, length);
+        for (int offset = 0; offset < count_chars;)
+        {
+            int code_point = env->CallIntMethod(characters, codePointAt, offset);
+            lk_input_queue_post_text_event(queue, code_point);
+            offset += (code_point < 0x10000) ? 1 : 2;
+        }
+    }
+
+    return lk_input_queue_schedule_event_respnose(queue, env);
+}
+
+static jlong lk_input_queue_nativeSendMotionEvent(JNIEnv* env, jobject clazz, jlong queue_ptr, jobject event_object)
+{
+    LK_Input_Queue* queue = (LK_Input_Queue*) queue_ptr;
+
+    static jclass    MotionEvent     = env->FindClass("android/view/MotionEvent");
+    static jmethodID getAction       = env->GetMethodID(MotionEvent, "getAction", "()I");
+    static jmethodID getPointerCount = env->GetMethodID(MotionEvent, "getPointerCount", "()I");
+    static jmethodID getPointerId    = env->GetMethodID(MotionEvent, "getPointerId", "(I)I");
+    static jmethodID getX            = env->GetMethodID(MotionEvent, "getX", "(I)F");
+    static jmethodID getY            = env->GetMethodID(MotionEvent, "getY", "(I)F");
+
+    const int ACTION_DOWN         = 0;
+    const int ACTION_UP           = 1;
+    const int ACTION_MOVE         = 2;
+    const int ACTION_CANCEL       = 3;
+    const int ACTION_OUTSIDE      = 4;
+    const int ACTION_POINTER_DOWN = 5;
+    const int ACTION_POINTER_UP   = 6;
+
+    int action = env->CallIntMethod(event_object, getAction);
+    LK_UI_Event kind = LK_UNKNOWN_UI_EVENT;
+    LK_B32 down = (action == ACTION_DOWN || action == ACTION_POINTER_DOWN || action == ACTION_CANCEL);
+    LK_B32 up   = (action == ACTION_UP || action == ACTION_POINTER_UP || action == ACTION_CANCEL);
+    LK_B32 move = (action == ACTION_MOVE || action == ACTION_OUTSIDE);
+
+    if (down || up || move)
+    {
+        int pointer_count = env->CallIntMethod(event_object, getPointerCount);
+        for (int pointer = 0; pointer < pointer_count; pointer++)
+        {
+            int pointer_id = env->CallIntMethod(event_object, getPointerId, pointer);
+            if (pointer_id >= LK_MAX_TOUCH)
+                continue;
+
+            LK_Input_Touch input;
+            input.down = down;
+            input.up = up;
+            input.pointer_id = pointer_id;
+            input.x = env->CallFloatMethod(event_object, getX, pointer);
+            input.y = env->CallFloatMethod(event_object, getY, pointer);
+            lk_input_queue_post_event(queue, LK_INPUT_TOUCH, &input, sizeof(input));
+        }
+    }
+
+    return lk_input_queue_schedule_event_respnose(queue, env);
+}
+
+static void lk_steal_input_queue_native_methods(JNIEnv* env)
+{
+    JNINativeMethod methods[] =
+    {
+        { "nativeInit",            "(Ljava/lang/ref/WeakReference;Landroid/os/MessageQueue;)J", (void*) lk_input_queue_nativeInit            },
+        { "nativeDispose",         "(J)V",                                                      (void*) lk_input_queue_nativeDispose         },
+        { "nativeSendKeyEvent",    "(JLandroid/view/KeyEvent;Z)J",                              (void*) lk_input_queue_nativeSendKeyEvent    },
+        { "nativeSendMotionEvent", "(JLandroid/view/MotionEvent;)J",                            (void*) lk_input_queue_nativeSendMotionEvent },
+    };
+
+    jclass InputQueue = env->FindClass("android/view/InputQueue");
+    env->UnregisterNatives(InputQueue);
+    env->RegisterNatives(InputQueue, methods, sizeof(methods) / sizeof(methods[0]));
 }
 
 
@@ -4941,29 +5381,25 @@ static void* lk_client_thread(void* activity_ptr)
 ////////////////////////////////////////////////////////////////////////////////
 
 
-static void lk_post_event(LK_Activity_Context* context, LK_Activity_Event event)
+static void lk_post_event(LK_Activity_Context* context, LK_UI_Event event)
 {
-    ssize_t count = write(context->event_write_fd, &event, sizeof(event));
-    if (count != sizeof(event))
-        lk_critical_error("failed to write to the activity event pipe");
+    lk_pipe_write(&context->events, &event, sizeof(event));
 }
 
 static LK_Activity_Context* lk_init_activity(ANativeActivity* activity)
 {
+    lk_steal_input_queue_native_methods(activity->env);
+
     LK_Activity_Context* context = (LK_Activity_Context*) calloc(1, sizeof(LK_Activity_Context));
-
-    int fd[2];
-    int error = pipe(fd);
-    if (error) lk_critical_error("failed to create the activity event pipe");
-    context->event_read_fd  = fd[0];
-    context->event_write_fd = fd[1];
-
     lk_semaphore_make(&context->event_sync);
+    lk_pipe_make(&context->events);
+    lk_pipe_make_async_executor(&context->async_executor);
+    context->native_activity = activity;
     context->asset_manager = activity->assetManager;
 
+    // create the thread
     pthread_attr_t attributes;
     pthread_attr_init(&attributes);
-
     pthread_t thread;
     pthread_create(&thread, &attributes, lk_client_thread, context);
     context->thread = thread;
@@ -4980,18 +5416,18 @@ static void lk_activity_destroy(ANativeActivity* activity)
     lk_post_event(context, LK_ACTIVITY_DESTROY);
     pthread_join(context->thread, NULL);
 
+    lk_pipe_free(&context->async_executor);
+    lk_pipe_free(&context->events);
     lk_semaphore_free(&context->event_sync);
-    close(context->event_read_fd);
-    close(context->event_write_fd);
     free(context);
 }
 
-static void lk_activity_start                (ANativeActivity* activity){ LK_Verbose("onStart()");                lk_post_event(LK_GetContext(), LK_ACTIVITY_START); }
-static void lk_activity_resume               (ANativeActivity* activity){ LK_Verbose("onResume()");               lk_post_event(LK_GetContext(), LK_ACTIVITY_RESUME); }
-static void lk_activity_pause                (ANativeActivity* activity){ LK_Verbose("onPause()");                lk_post_event(LK_GetContext(), LK_ACTIVITY_PAUSE); }
-static void lk_activity_stop                 (ANativeActivity* activity){ LK_Verbose("onStop()");                 lk_post_event(LK_GetContext(), LK_ACTIVITY_STOP); }
-static void lk_activity_configuration_changed(ANativeActivity* activity){ LK_Verbose("onConfigurationChanged()"); lk_post_event(LK_GetContext(), LK_ACTIVITY_CONFIGURATION_UPDATED); }
-static void lk_activity_low_memory           (ANativeActivity* activity){ LK_Verbose("onLowMemory()");            lk_post_event(LK_GetContext(), LK_ACTIVITY_LOW_MEMORY); }
+static void lk_activity_start                (ANativeActivity* activity) { LK_Verbose("onStart()");                lk_post_event(LK_GetContext(), LK_ACTIVITY_START); }
+static void lk_activity_resume               (ANativeActivity* activity) { LK_Verbose("onResume()");               lk_post_event(LK_GetContext(), LK_ACTIVITY_RESUME); }
+static void lk_activity_pause                (ANativeActivity* activity) { LK_Verbose("onPause()");                lk_post_event(LK_GetContext(), LK_ACTIVITY_PAUSE); }
+static void lk_activity_stop                 (ANativeActivity* activity) { LK_Verbose("onStop()");                 lk_post_event(LK_GetContext(), LK_ACTIVITY_STOP); }
+static void lk_activity_configuration_changed(ANativeActivity* activity) { LK_Verbose("onConfigurationChanged()"); lk_post_event(LK_GetContext(), LK_ACTIVITY_CONFIGURATION_UPDATED); }
+static void lk_activity_low_memory           (ANativeActivity* activity) { LK_Verbose("onLowMemory()");            lk_post_event(LK_GetContext(), LK_ACTIVITY_LOW_MEMORY); }
 
 static void lk_activity_window_focus_changed(ANativeActivity* activity, int focused)
 {
@@ -5003,8 +5439,8 @@ static void lk_activity_native_window_created(ANativeActivity* activity, ANative
 {
     LK_Verbose("onNativeWindowCreated()");
     LK_Activity_Context* context = LK_GetContext();
-    context->new_window = window;
     lk_post_event(context, LK_ACTIVITY_NATIVE_WINDOW_CREATED);
+    lk_pipe_write(&context->events, &window, sizeof(window));
     lk_semaphore_wait(&context->event_sync);
 }
 
@@ -5016,21 +5452,19 @@ static void lk_activity_native_window_destroyed(ANativeActivity* activity, ANati
     lk_semaphore_wait(&context->event_sync);
 }
 
-static void lk_activity_input_queue_created(ANativeActivity* activity, AInputQueue* queue)
+static void lk_activity_input_queue_created(ANativeActivity* activity, AInputQueue* queue_ptr)
 {
     LK_Verbose("onInputQueueCreated()");
     LK_Activity_Context* context = LK_GetContext();
-    context->new_queue = queue;
-    lk_post_event(context, LK_ACTIVITY_INPUT_QUEUE_CREATED);
-    lk_semaphore_wait(&context->event_sync);
+    LK_Input_Queue* queue = (LK_Input_Queue*) queue_ptr;
+    queue->events = &context->events;
 }
 
-static void lk_activity_input_queue_destroyed(ANativeActivity* activity, AInputQueue* queue)
+static void lk_activity_input_queue_destroyed(ANativeActivity* activity, AInputQueue* queue_ptr)
 {
     LK_Verbose("onInputQueueDestroyed()");
-    LK_Activity_Context* context = LK_GetContext();
-    lk_post_event(context, LK_ACTIVITY_INPUT_QUEUE_DESTROYED);
-    lk_semaphore_wait(&context->event_sync);
+    LK_Input_Queue* queue = (LK_Input_Queue*) queue_ptr;
+    queue->events = NULL;
 }
 
 static void* lk_activity_save_instance_state(ANativeActivity* activity, size_t* out_size)
