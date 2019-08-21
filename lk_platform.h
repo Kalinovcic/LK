@@ -4234,6 +4234,16 @@ static void lk_critical_error(const char* message)
     abort();
 }
 
+static char* lk_concatenate_strings(char* a, char* b)
+{
+    size_t len_a = a ? strlen(a) : 0;
+    size_t len_b = b ? strlen(b) : 0;
+    char* result = (char*) malloc(len_a + len_b + 0);
+    if (len_a) memcpy(result,         a, len_a);
+    if (len_b) memcpy(result + len_a, b, len_b);
+    return result;
+}
+
 typedef sem_t LK_Semaphore;
 static void lk_semaphore_make(LK_Semaphore* semaphore) { if (sem_init   (semaphore, 0, 0)) lk_critical_error("failed to sem_init");    }
 static void lk_semaphore_free(LK_Semaphore* semaphore) { if (sem_destroy(semaphore))       lk_critical_error("failed to sem_destroy"); }
@@ -4997,6 +5007,10 @@ static void* lk_client_thread(void* activity_ptr)
             {
                 LK_Input_Text input;
                 lk_pipe_read(events, &input, sizeof(input));
+
+                char* old_text = platform.keyboard.text;
+                platform.keyboard.text = lk_concatenate_strings(old_text, input.utf8);
+                free(old_text);
             } break;
 
             case LK_INPUT_TOUCH:
@@ -5082,12 +5096,15 @@ static void* lk_client_thread(void* activity_ptr)
             lk_update_time_stamp(&time, &platform);
             client.functions.frame(&platform);
 
-            // Clear keyboard pressed/released flags.
+            // Clear some keyboard state.
             for (int i = 0; i < LK__KEY_COUNT; i++)
             {
                 platform.keyboard.state[i].pressed  = 0;
                 platform.keyboard.state[i].released = 0;
             }
+
+            free(platform.keyboard.text);
+            platform.keyboard.text = NULL;
 
             // Display frame.
             if (platform.window.backend == LK_WINDOW_CANVAS)
