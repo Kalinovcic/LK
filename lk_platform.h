@@ -4199,6 +4199,7 @@ int main(int argc, char** argv)
 #include <android/log.h>
 
 #include <EGL/egl.h>
+#include <EGL/eglext.h>
 
 #include <SLES/OpenSLES.h>
 #include <SLES/OpenSLES_Android.h>
@@ -4249,6 +4250,13 @@ static void lk_semaphore_make(LK_Semaphore* semaphore) { if (sem_init   (semapho
 static void lk_semaphore_free(LK_Semaphore* semaphore) { if (sem_destroy(semaphore))       lk_critical_error("failed to sem_destroy"); }
 static void lk_semaphore_post(LK_Semaphore* semaphore) { if (sem_post   (semaphore))       lk_critical_error("failed to sem_post");    }
 static void lk_semaphore_wait(LK_Semaphore* semaphore) { if (sem_wait   (semaphore))       lk_critical_error("failed to sem_wait");    }
+
+static int lk_get_sdk_version(JNIEnv* env)
+{
+    jclass Version = env->FindClass("android/os/Build$VERSION" );
+    jfieldID sdk_field = env->GetStaticFieldID(Version, "SDK_INT", "I");
+    return env->GetStaticIntField(Version, sdk_field);
+}
 
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -4303,7 +4311,7 @@ static void lk_pipe_read(LK_Pipe* p, void* object, size_t size)
         lk_critical_error("failed to read from the async UI call pipe");
 }
 
-static void lk_pipe_write(LK_Pipe* p, void* object, size_t size)
+static void lk_pipe_write(LK_Pipe* p, const void* object, size_t size)
 {
     if (write(p->write_fd, object, size) != size)
         lk_critical_error("failed to read from the async UI call pipe");
@@ -4642,93 +4650,213 @@ static void lk_end_audio(LK_Audio_Context* audio)
 struct LK_OpenGL_Context
 {
     EGLDisplay display;
+    int reference_count;
+    bool has_khr_create_context;
+    bool has_khr_debug;
+
     EGLSurface surface;
     EGLContext context;
+    EGLConfig  config;
 };
 
-static void lk_create_egl_context(LK_OpenGL_Context* gl, LK_Platform* platform, ANativeWindow* window)
+static LK_B32 lk_egl_check_extension(LK_OpenGL_Context* gl, const char* name)
 {
-    EGLDisplay display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
-    eglInitialize(display, 0, 0);
+    const char* extensions = eglQueryString(gl->display, EGL_EXTENSIONS);
+    if (!extensions) return 0;
 
-    // Choose config.
+    int name_length = strlen(name);
+    const char* token = extensions;
+    const char* cursor = extensions;
+    do if (*cursor == ' ' || *cursor == 0)
+    {
+        if (cursor - token == name_length)
+            if (memcmp(name, token, name_length) == 0)
+            {
+                LK_Verbose("%s: yes", name);
+                return 1;
+            }
+        token = cursor + 1;
+    }
+    while (*(cursor++));
+
+    LK_Verbose("%s: no", name);
+    return 0;
+}
+
+static void lk_initialize_egl(LK_OpenGL_Context* gl, LK_Platform* platform)
+{
+    if (gl->reference_count++) return;
+
+    //
+    // Get the EGL display
+    //
+    EGLDisplay display;
+    {
+        display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
+        if (display == EGL_NO_DISPLAY)
+            lk_critical_error("couldn't get the EGL display");
+
+        if (!eglInitialize(display, 0, 0))
+            lk_critical_error("couldn't initialize EGL");
+    }
+    gl->display = display;
+
+    //
+    // Check for extensions.
+    //
+    LK_Verbose("EGL version: %s", eglQueryString(display, EGL_VERSION));
+    gl->has_khr_create_context = lk_egl_check_extension(gl, "EGL_KHR_create_context");
+    gl->has_khr_debug = lk_egl_check_extension(gl, "EGL_KHR_debug");
+
+    //
+    // Find best matching configuration.
+    //
     EGLConfig config = NULL;
     {
-        EGLint attribs[] =
+        struct Attribute { EGLint key, value; };
+        Attribute attribute_buffer[16];
+        Attribute* cursor = attribute_buffer;
+
+        *(cursor++) = { EGL_RED_SIZE,   8 };
+        *(cursor++) = { EGL_GREEN_SIZE, 8 };
+        *(cursor++) = { EGL_BLUE_SIZE,  8 };
+        if (platform->opengl.depth_bits)       *(cursor++) = { EGL_DEPTH_SIZE,   (EGLint) platform->opengl.depth_bits   };
+        if (platform->opengl.stencil_bits)     *(cursor++) = { EGL_STENCIL_SIZE, (EGLint) platform->opengl.stencil_bits };
+        if (platform->opengl.sample_count > 1) *(cursor++) = { EGL_SAMPLES,      (EGLint) platform->opengl.sample_count };
+
+        if (platform->opengl.major_version >= 3 && gl->has_khr_create_context)
+            *(cursor++) = { EGL_RENDERABLE_TYPE, EGL_OPENGL_ES3_BIT_KHR };
+        else if (platform->opengl.major_version >= 2)
+            *(cursor++) = { EGL_RENDERABLE_TYPE, EGL_OPENGL_ES2_BIT };
+        else
+            *(cursor++) = { EGL_RENDERABLE_TYPE, EGL_OPENGL_ES_BIT };
+
+        *cursor = { EGL_NONE };
+
+        // Find possible configurations.
+        const int MAX_OPTIONS = 128;
+        EGLConfig options[MAX_OPTIONS];
+        int count_options = 0;
+
+        EGLint* attributes = (EGLint*) &attribute_buffer[0];
+        if (!eglChooseConfig(display, attributes, options, MAX_OPTIONS, &count_options))
+            count_options = 0;
+
+        // Choose best configuration.
+        if (count_options)
+            config = options[0];
+
+        if (!config)
+            lk_critical_error("failed to find a matching EGL configuration");
+    }
+    gl->config = config;
+}
+
+static void lk_uninitialize_egl(LK_OpenGL_Context* gl)
+{
+    if (--gl->reference_count) return;
+
+    gl->config = NULL;
+    eglTerminate(gl->display);
+    gl->display = EGL_NO_DISPLAY;
+}
+
+static void lk_make_egl_context_current_if_complete(LK_OpenGL_Context* gl)
+{
+    EGLSurface surface = gl->surface;
+    EGLContext context = gl->context;
+    if (surface == EGL_NO_SURFACE) return;
+    if (context == EGL_NO_CONTEXT) return;
+
+    if (eglMakeCurrent(gl->display, surface, surface, context) == EGL_FALSE)
+        lk_critical_error("failed to eglMakeCurrent");
+}
+
+static void lk_create_egl_context(LK_OpenGL_Context* gl, LK_Platform* platform)
+{
+    lk_initialize_egl(gl, platform);
+
+    //
+    // Create the context.
+    //
+    EGLContext context = EGL_NO_CONTEXT;
+    {
+        EGLint flags = 0;
+        if (platform->opengl.debug_context && gl->has_khr_debug) flags |= EGL_CONTEXT_OPENGL_DEBUG_BIT_KHR;
+        if (platform->opengl.compatibility_context) flags |= EGL_CONTEXT_OPENGL_COMPATIBILITY_PROFILE_BIT_KHR;
+
+        struct Attribute { EGLint key, value; };
+        Attribute attribute_buffer[16];
+        Attribute* cursor = attribute_buffer;
+
+        if ((platform->opengl.major_version < 3 || platform->opengl.minor_version == 0) && !flags)
         {
-            EGL_SURFACE_TYPE, EGL_WINDOW_BIT,
-            EGL_BUFFER_SIZE,  (EGLint) platform->opengl.color_bits,
-            EGL_DEPTH_SIZE,   (EGLint) platform->opengl.depth_bits,
-            EGL_STENCIL_SIZE, (EGLint) platform->opengl.stencil_bits,
-            EGL_SAMPLES,      (EGLint) platform->opengl.sample_count,
-            EGL_NONE
-        };
-
-        EGLint count_configs;
-        eglChooseConfig(display, attribs, NULL, 0, &count_configs);
-        EGLConfig* configs = (EGLConfig*) calloc(count_configs, sizeof(EGLConfig));
-        eglChooseConfig(display, attribs, configs, count_configs, &count_configs);
-
-        for (EGLint i = 0; i < count_configs; i++)
+            *(cursor++) = { EGL_CONTEXT_CLIENT_VERSION, (EGLint) platform->opengl.major_version };
+        }
+        else
         {
-            EGLConfig option = configs[i];
-            if (!config) config = option;
+            if (!gl->has_khr_create_context)
+                lk_critical_error("can't create EGL context because context attributes aren't supported");
 
-            EGLint color_bits;
-            if (!eglGetConfigAttrib(display, option, EGL_BUFFER_SIZE, &color_bits)) continue;
-            if (color_bits != platform->opengl.color_bits) continue;
-
-            EGLint depth_bits;
-            if (!eglGetConfigAttrib(display, option, EGL_DEPTH_SIZE, &depth_bits)) continue;
-            if (depth_bits != platform->opengl.depth_bits) continue;
-
-            EGLint stencil_bits;
-            if (!eglGetConfigAttrib(display, option, EGL_STENCIL_SIZE, &stencil_bits)) continue;
-            if (stencil_bits != platform->opengl.stencil_bits) continue;
-
-            EGLint sample_count;
-            if (!eglGetConfigAttrib(display, option, EGL_SAMPLES, &sample_count)) continue;
-            if (sample_count != platform->opengl.sample_count) continue;
-
-            config = option;
-            break;
+            *(cursor++) = { EGL_CONTEXT_MAJOR_VERSION_KHR, (EGLint) platform->opengl.major_version };
+            *(cursor++) = { EGL_CONTEXT_MINOR_VERSION_KHR, (EGLint) platform->opengl.minor_version };
+            if (flags) *(cursor++) = { EGL_CONTEXT_FLAGS_KHR, flags };
         }
 
-        free(configs);
+        *cursor = { EGL_NONE };
+
+        EGLContext share_context = EGL_NO_CONTEXT;
+        EGLint* attributes = (EGLint*) &attribute_buffer[0];
+        context = eglCreateContext(gl->display, gl->config, share_context, attributes);
+
+        if (context == EGL_NO_CONTEXT)
+            lk_critical_error("failed to create an EGL context");
     }
-
-    EGLint context_attribs[] =
-    {
-        EGL_CONTEXT_MAJOR_VERSION, (EGLint) platform->opengl.major_version,
-        EGL_CONTEXT_MINOR_VERSION, (EGLint) platform->opengl.minor_version,
-        EGL_NONE
-    };
-
-    EGLSurface surface = eglCreateWindowSurface(display, config, window, NULL);
-    EGLContext context = eglCreateContext(display, config, NULL, context_attribs);
-
-    if (eglMakeCurrent(display, surface, surface, context) == EGL_FALSE)
-        lk_critical_error("Unable to eglMakeCurrent");
-
-    LK_Verbose("EGL version: %s", eglQueryString(display, EGL_VERSION));
-    LK_Verbose("EGL vendor:  %s", eglQueryString(display, EGL_VENDOR));
-
-    gl->display = display;
-    gl->surface = surface;
     gl->context = context;
+    lk_make_egl_context_current_if_complete(gl);
 }
 
 static void lk_destroy_egl_context(LK_OpenGL_Context* gl)
 {
-    if (gl->display)
-    {
-        eglMakeCurrent(gl->display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
-        if (gl->context) eglDestroyContext(gl->display, gl->context);
-        if (gl->surface) eglDestroySurface(gl->display, gl->surface);
-        eglTerminate(gl->display);
-    }
+    eglMakeCurrent(gl->display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+    eglDestroyContext(gl->display, gl->context);
+    gl->context = EGL_NO_CONTEXT;
+    lk_uninitialize_egl(gl);
+}
 
-    memset(gl, 0, sizeof(LK_OpenGL_Context));
+static void lk_create_egl_surface(LK_OpenGL_Context* gl, LK_Platform* platform, ANativeWindow* window)
+{
+    lk_initialize_egl(gl, platform);
+
+    EGLDisplay display = gl->display;
+    EGLConfig  config  = gl->config;
+
+    //
+    // Create the surface.
+    //
+    EGLSurface surface = EGL_NO_SURFACE;
+    {
+        EGLint format;
+        eglGetConfigAttrib(display, config, EGL_NATIVE_VISUAL_ID, &format);
+        if (ANativeWindow_setBuffersGeometry(window, 0, 0, format))
+            lk_critical_error("failed to set native window buffer geometry");
+
+        EGLint attributes[1] = { EGL_NONE };
+        surface = eglCreateWindowSurface(display, config, window, attributes);
+
+        if (surface == EGL_NO_SURFACE)
+            lk_critical_error("failed to create an EGL surface");
+    }
+    gl->surface = surface;
+    lk_make_egl_context_current_if_complete(gl);
+}
+
+static void lk_destroy_egl_surface(LK_OpenGL_Context* gl)
+{
+    eglMakeCurrent(gl->display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+    eglDestroySurface(gl->display, gl->surface);
+    gl->surface = EGL_NO_SURFACE;
+    lk_uninitialize_egl(gl);
 }
 
 
@@ -4810,6 +4938,7 @@ enum LK_UI_Event: LK_U8
     LK_ACTIVITY_FOCUS_LOST,
     LK_ACTIVITY_NATIVE_WINDOW_CREATED,
     LK_ACTIVITY_NATIVE_WINDOW_DESTROYED,
+    LK_ACTIVITY_CONTENT_RECTANGLE_CHANGED,
     LK_INPUT_KEY,
     LK_INPUT_TEXT,
     LK_INPUT_TOUCH,
@@ -4878,8 +5007,8 @@ static void* lk_client_thread(void* activity_ptr)
     LK_OpenGL_Context opengl = { 0 };
 
     ANativeWindow* window = NULL;
-    LK_U32 window_width  = 0;
-    LK_U32 window_height = 0;
+    ARect content_rectangle;
+    LK_B32 started = false;
     LK_B32 first_frame = true;
 
     lk_initialize_timer(&time);
@@ -4931,17 +5060,28 @@ static void* lk_client_thread(void* activity_ptr)
                 platform.opengl.sample_count  = 1;
                 client.functions.init(&platform);
 
+                if (platform.window.backend == LK_WINDOW_OPENGL)
+                    lk_create_egl_context(&opengl, &platform);
+
                 first_frame = true;
                 if (is_rendering_audio)
                     lk_begin_audio(&audio, &platform, &client);
+
+                started = true;
             } break;
 
             case LK_ACTIVITY_STOP:
             {
                 lk_update_time_stamp(&time, &platform);
                 client.functions.close(&platform);
+
+                if (platform.window.backend == LK_WINDOW_OPENGL)
+                    lk_destroy_egl_context(&opengl);
+
                 if (is_rendering_audio)
                     lk_end_audio(&audio);
+
+                started = false;
             } break;
 
             case LK_ACTIVITY_RESUME: break;
@@ -4970,20 +5110,21 @@ static void* lk_client_thread(void* activity_ptr)
             {
                 lk_pipe_read(events, &window, sizeof(window));
                 if (platform.window.backend == LK_WINDOW_OPENGL)
-                    lk_create_egl_context(&opengl, &platform, window);
+                    lk_create_egl_surface(&opengl, &platform, window);
                 lk_semaphore_post(&activity->event_sync);
-
-                window_width  = ANativeWindow_getWidth(window);
-                window_height = ANativeWindow_getHeight(window);
-                ANativeWindow_setBuffersGeometry(window, 0, 0, AHARDWAREBUFFER_FORMAT_R8G8B8A8_UNORM);
             } break;
 
             case LK_ACTIVITY_NATIVE_WINDOW_DESTROYED:
             {
                 if (platform.window.backend == LK_WINDOW_OPENGL)
-                    lk_destroy_egl_context(&opengl);
+                    lk_destroy_egl_surface(&opengl);
                 window = NULL;
                 lk_semaphore_post(&activity->event_sync);
+            } break;
+
+            case LK_ACTIVITY_CONTENT_RECTANGLE_CHANGED:
+            {
+                lk_pipe_read(events, &content_rectangle, sizeof(content_rectangle));
             } break;
 
             case LK_INPUT_KEY:
@@ -5030,19 +5171,19 @@ static void* lk_client_thread(void* activity_ptr)
         //
         // No input, so render a frame.
         //
-        else if (window)
+        else if (started && window)
         {
             // Update window.
-            platform.window.x      = 0;
-            platform.window.y      = 0;
-            platform.window.width  = window_width;
-            platform.window.height = window_height;
+            platform.window.x      = content_rectangle.left;
+            platform.window.y      = content_rectangle.top;
+            platform.window.width  = content_rectangle.right - content_rectangle.left;
+            platform.window.height = content_rectangle.bottom - content_rectangle.top;
 
             if (platform.window.backend == LK_WINDOW_CANVAS)
             {
-                platform.canvas.width  = window_width;
-                platform.canvas.height = window_height;
-                platform.canvas.data = (LK_U8*) malloc(window_width * window_height * 4);
+                platform.canvas.width  = platform.window.width;
+                platform.canvas.height = platform.window.height;
+                platform.canvas.data = (LK_U8*) malloc(platform.window.width * platform.window.height * 4);
             }
 
             if (platform.window.fullscreen)
@@ -5112,23 +5253,27 @@ static void* lk_client_thread(void* activity_ptr)
                 ANativeWindow_Buffer buffer;
                 if (ANativeWindow_lock(window, &buffer, NULL) == 0)
                 {
-                    LK_U32 width  = platform.canvas.width;
-                    LK_U32 height = platform.canvas.height;
-                    if (buffer.width  < width)  width  = buffer.width;
-                    if (buffer.height < height) height = buffer.height;
+                    ARect rect = content_rectangle;
+                    if (rect.left < 0) rect.left = 0;
+                    if (rect.top  < 0) rect.top  = 0;
+                    if (rect.right  > buffer.width)  rect.right  = buffer.width;
+                    if (rect.bottom > buffer.height) rect.bottom = buffer.height;
 
-                    LK_U32* read  = (LK_U32*) platform.canvas.data;
-                    LK_U32* write = (LK_U32*) buffer.bits;
-                    if (buffer.stride == platform.canvas.width)
+                    int rect_width  = rect.right - rect.left;
+                    int rect_height = rect.bottom - rect.top;
+
+                    LK_U32* write = (LK_U32*) buffer.bits + rect.top * buffer.stride + rect.left;
+                    LK_U32* read = (LK_U32*) platform.canvas.data;
+                    if (rect_width == platform.canvas.width)
                     {
-                        memcpy(write, read, height * width * 4);
+                        memcpy(write, read, rect_height * rect_width * 4);
                     }
                     else
                     {
-                        for (LK_U32 y = 0; y < height; y++)
+                        for (int y = 0; y < rect_height; y++)
                         {
-                            memcpy(write, read, width * 4);
-                            read  += platform.canvas.width;
+                            memcpy(write, read, rect_width * 4);
+                            read += platform.canvas.width;
                             write += buffer.stride;
                         }
                     }
@@ -5163,7 +5308,9 @@ static void* lk_client_thread(void* activity_ptr)
 struct LK_Input_Queue
 {
     jobject object;  // android.view.InputQueue
+
     jmethodID finishInputEvent;
+    bool finishInputEvent_is32;
 
     LK_Pipe* events;
     LK_Pipe async_executor;
@@ -5180,7 +5327,10 @@ static jlong lk_input_queue_nativeInit(JNIEnv* env, jobject clazz, jobject queue
 
     jclass InputQueue = env->GetObjectClass(queue_object);
     queue->object = env->NewGlobalRef(queue_object);
-    queue->finishInputEvent = env->GetMethodID(InputQueue, "finishInputEvent", "(JZ)V");
+
+    int sdk_version = lk_get_sdk_version(env);
+    queue->finishInputEvent_is32 = sdk_version <= 20;  // KitKat uses jint instead of jlong for pointers in Java
+    queue->finishInputEvent = env->GetMethodID(InputQueue, "finishInputEvent", queue->finishInputEvent_is32 ? "(IZ)V" : "(JZ)V");
 
     lk_pipe_make_async_executor(&queue->async_executor);
     queue->next_id = 1;
@@ -5207,7 +5357,10 @@ static void lk_input_queue_async_finishInputEvent(LK_Pipe* pipe)
     lk_pipe_read(pipe, &id, sizeof(id));
 
     jboolean handled = 0;
-    env->CallVoidMethod(queue->object, queue->finishInputEvent, (jlong) id, handled);
+    if (queue->finishInputEvent_is32)
+        env->CallVoidMethod(queue->object, queue->finishInputEvent, (jint) id, handled);
+    else
+        env->CallVoidMethod(queue->object, queue->finishInputEvent, (jlong) id, handled);
 }
 
 static jlong lk_input_queue_schedule_event_respnose(LK_Input_Queue* queue, JNIEnv* env)
@@ -5406,15 +5559,31 @@ static jlong lk_input_queue_nativeSendMotionEvent(JNIEnv* env, jobject clazz, jl
     return lk_input_queue_schedule_event_respnose(queue, env);
 }
 
+
+static jint lk_input_queue_nativeInit32(JNIEnv* env, jobject clazz, jobject queue, jobject message_queue) { return (jint) lk_input_queue_nativeInit(env, clazz, queue, message_queue); }
+static void lk_input_queue_nativeDispose32(JNIEnv* env, jobject clazz, jint ptr) { lk_input_queue_nativeDispose(env, clazz, (jlong) ptr); }
+static jint lk_input_queue_nativeSendKeyEvent32(JNIEnv* env, jobject clazz, jint ptr, jobject e, jboolean predispatch) { return (jint) lk_input_queue_nativeSendKeyEvent32(env, clazz, (jlong) ptr, e, predispatch); }
+static jint lk_input_queue_nativeSendMotionEvent32(JNIEnv* env, jobject clazz, jint ptr, jobject e) { return (jint) lk_input_queue_nativeSendMotionEvent32(env, clazz, (jlong) ptr, e); }
+
 static void lk_steal_input_queue_native_methods(JNIEnv* env)
 {
-    JNINativeMethod methods[] =
+    int sdk_version = lk_get_sdk_version(env);
+
+    JNINativeMethod methods[4];
+    if (sdk_version <= 20)  // KitKat uses jint instead of jlong for pointers in Java
     {
-        { "nativeInit",            "(Ljava/lang/ref/WeakReference;Landroid/os/MessageQueue;)J", (void*) lk_input_queue_nativeInit            },
-        { "nativeDispose",         "(J)V",                                                      (void*) lk_input_queue_nativeDispose         },
-        { "nativeSendKeyEvent",    "(JLandroid/view/KeyEvent;Z)J",                              (void*) lk_input_queue_nativeSendKeyEvent    },
-        { "nativeSendMotionEvent", "(JLandroid/view/MotionEvent;)J",                            (void*) lk_input_queue_nativeSendMotionEvent },
-    };
+        methods[0] = { "nativeInit",            "(Ljava/lang/ref/WeakReference;Landroid/os/MessageQueue;)I", (void*) lk_input_queue_nativeInit32            };
+        methods[1] = { "nativeDispose",         "(I)V",                                                      (void*) lk_input_queue_nativeDispose32         };
+        methods[2] = { "nativeSendKeyEvent",    "(ILandroid/view/KeyEvent;Z)I",                              (void*) lk_input_queue_nativeSendKeyEvent32    };
+        methods[3] = { "nativeSendMotionEvent", "(ILandroid/view/MotionEvent;)I",                            (void*) lk_input_queue_nativeSendMotionEvent32 };
+    }
+    else
+    {
+        methods[0] = { "nativeInit",            "(Ljava/lang/ref/WeakReference;Landroid/os/MessageQueue;)J", (void*) lk_input_queue_nativeInit            };
+        methods[1] = { "nativeDispose",         "(J)V",                                                      (void*) lk_input_queue_nativeDispose         };
+        methods[2] = { "nativeSendKeyEvent",    "(JLandroid/view/KeyEvent;Z)J",                              (void*) lk_input_queue_nativeSendKeyEvent    };
+        methods[3] = { "nativeSendMotionEvent", "(JLandroid/view/MotionEvent;)J",                            (void*) lk_input_queue_nativeSendMotionEvent };
+    }
 
     jclass InputQueue = env->FindClass("android/view/InputQueue");
     env->UnregisterNatives(InputQueue);
@@ -5498,6 +5667,14 @@ static void lk_activity_native_window_destroyed(ANativeActivity* activity, ANati
     lk_semaphore_wait(&context->event_sync);
 }
 
+static void lk_activity_content_rect_changed(ANativeActivity* activity, const ARect* rect)
+{
+    LK_Verbose("onContentRectChanged(l=%d, r=%d, t=%d, b=%d)", rect->left, rect->right, rect->top, rect->bottom);
+    LK_Activity_Context* context = LK_GetContext();
+    lk_post_event(context, LK_ACTIVITY_CONTENT_RECTANGLE_CHANGED);
+    lk_pipe_write(&context->events, rect, sizeof(ARect));
+}
+
 static void lk_activity_input_queue_created(ANativeActivity* activity, AInputQueue* queue_ptr)
 {
     LK_Verbose("onInputQueueCreated()");
@@ -5538,6 +5715,7 @@ JNIEXPORT void ANativeActivity_onCreate(ANativeActivity* activity, void* saved_s
     activity->callbacks->onWindowFocusChanged    = lk_activity_window_focus_changed;
     activity->callbacks->onNativeWindowCreated   = lk_activity_native_window_created;
     activity->callbacks->onNativeWindowDestroyed = lk_activity_native_window_destroyed;
+    activity->callbacks->onContentRectChanged    = lk_activity_content_rect_changed;
     activity->callbacks->onInputQueueCreated     = lk_activity_input_queue_created;
     activity->callbacks->onInputQueueDestroyed   = lk_activity_input_queue_destroyed;
     activity->callbacks->onSaveInstanceState     = lk_activity_save_instance_state;
