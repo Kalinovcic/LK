@@ -117,21 +117,22 @@ DOCUMENTATION
 #endif
 
 
+#include <stdint.h>
+
 #ifdef __cplusplus
 extern "C"
 {
 #endif
 
-#ifndef LK_SIMPLE_TYPES
-#define LK_SIMPLE_TYPES
-typedef signed char  LK_S8;
-typedef signed short LK_S16;
-typedef signed int   LK_S32;
+typedef int8_t  LK_S8;
+typedef int16_t LK_S16;
+typedef int32_t LK_S32;
+typedef int64_t LK_S64;
 
-typedef unsigned char      LK_U8;
-typedef unsigned short     LK_U16;
-typedef unsigned int       LK_U32;
-typedef unsigned long long LK_U64;
+typedef uint8_t  LK_U8;
+typedef uint16_t LK_U16;
+typedef uint32_t LK_U32;
+typedef uint64_t LK_U64;
 
 typedef LK_U8  LK_B8;
 typedef LK_U16 LK_B16;
@@ -139,7 +140,6 @@ typedef LK_U32 LK_B32;
 
 typedef float  LK_F32;
 typedef double LK_F64;
-#endif
 
 typedef enum
 {
@@ -4946,7 +4946,7 @@ enum LK_UI_Event: LK_U8
 
 struct LK_Input_Key
 {
-    LK_S8 down;
+    LK_B8 down;
     LK_Key key;
 };
 
@@ -4957,8 +4957,8 @@ struct LK_Input_Text
 
 struct LK_Input_Touch
 {
-    LK_S8  down;
-    LK_S8  up;
+    LK_B8  down;
+    LK_B8  up;
     LK_S32 pointer_id;
     float  x;
     float  y;
