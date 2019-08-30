@@ -1376,7 +1376,7 @@ lk_window_callback(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam)
         for (auto m : message_list)
             if (m.code == message)
                 message_name = m.text;
-        printf("%p: HWND %p, MSG %08x, %016llx, %016llx (%d: %s)\n", lk_window_callback, hwnd, message, wparam, lparam, lk_platform->window.x, message_name);
+        printf("%p: HWND %p, MSG %08x, %016llx, %016llx (%s)\n", lk_window_callback, hwnd, message, wparam, lparam, message_name);
         lock = 0;
     }
 #endif
@@ -3829,29 +3829,32 @@ void lk_entry(LK_Client_Functions* functions)
                 LONG extended_style = GetWindowLong(window.hwnd, GWL_EXSTYLE);
                 SetWindowLong(window.hwnd, GWL_STYLE, style);
 
-                // client dimensions to window dimensions
-                RECT window_bounds;
-                window_bounds.left = 0;
-                window_bounds.top = 0;
-                window_bounds.right = (LONG) platform.window.width;
-                window_bounds.bottom = (LONG) platform.window.height;
-                AdjustWindowRectEx(&window_bounds, style, 0, extended_style);
-
-                LK_S32 x      = platform.window.x + window_bounds.left;
-                LK_S32 y      = platform.window.y + window_bounds.top;
-                LK_U32 width  = window_bounds.right  - window_bounds.left;
-                LK_U32 height = window_bounds.bottom - window_bounds.top;
-
-                // move and resize the window
-                UINT swp_flags = SWP_NOOWNERZORDER | SWP_FRAMECHANGED | (toggle_fullscreen ? 0 : SWP_NOZORDER);
-                SetWindowPos(window.hwnd, HWND_TOP, x, y, width, height, swp_flags);
-                ShowWindow(window.hwnd, platform.window.invisible ? SW_HIDE : SW_SHOW);
-
-                // if shown on first frame, request focus
-                if (first_frame && !platform.window.invisible)
+                if (!(last_window_style & WS_MINIMIZE))
                 {
-                    SetForegroundWindow(window.hwnd);
-                    SetFocus(window.hwnd);
+                    // client dimensions to window dimensions
+                    RECT window_bounds;
+                    window_bounds.left = 0;
+                    window_bounds.top = 0;
+                    window_bounds.right = (LONG) platform.window.width;
+                    window_bounds.bottom = (LONG) platform.window.height;
+                    AdjustWindowRectEx(&window_bounds, style, 0, extended_style);
+
+                    LK_S32 x      = platform.window.x + window_bounds.left;
+                    LK_S32 y      = platform.window.y + window_bounds.top;
+                    LK_U32 width  = window_bounds.right  - window_bounds.left;
+                    LK_U32 height = window_bounds.bottom - window_bounds.top;
+
+                    // move and resize the window
+                    UINT swp_flags = SWP_NOOWNERZORDER | SWP_FRAMECHANGED | (toggle_fullscreen ? 0 : SWP_NOZORDER);
+                    SetWindowPos(window.hwnd, HWND_TOP, x, y, width, height, swp_flags);
+                    ShowWindow(window.hwnd, platform.window.invisible ? SW_HIDE : SW_SHOW);
+
+                    // if shown on first frame, request focus
+                    if (first_frame && !platform.window.invisible)
+                    {
+                        SetForegroundWindow(window.hwnd);
+                        SetFocus(window.hwnd);
+                    }
                 }
             }
 
