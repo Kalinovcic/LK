@@ -1,11 +1,11 @@
-//  lk_platform->h - public domain platform abstraction layer with live code editing support
+//  lk_platform.h - public domain platform abstraction layer with live code editing support
 //  no warranty is offered or implied
 
 /*********************************************************************************************
 
 Include this file in all places you need to refer to it. In one of your compilation units, write:
     #define LK_PLATFORM_IMPLEMENTATION
-before including lk_platform->h, in order to paste in the source code.
+before including lk_platform.h, in order to paste in the source code.
 
 This library provides a platform layer with support for live code editing. That enables you to
 modify your source code, recompile it, and see the changes happen live (on the next frame),
@@ -15,11 +15,11 @@ layer will then load the DLL dynamically at runtime, and reload it if it detects
 
 If you want live code editing, you must specify the DLL name (not including the extension) by defining:
     #define LK_PLATFORM_DLL_NAME "my_application_dll"
-before including the implementation of lk_platform->h.
+before including the implementation of lk_platform.h.
 
 If you don't want live code editing, you must disable it by defining:
     #define LK_PLATFORM_NO_DLL
-before including the implementation of lk_platform->h.
+before including the implementation of lk_platform.h.
 
 As for the platform layer itself, it's designed to minimize interaction between the application
 and the platform. All communication goes through a single LK_Platform context struct, and the only
@@ -407,7 +407,7 @@ typedef struct LK_Platform_Structure
 
         void* handle;  // set after init, HWND on Windows
 
-        char* title;  // reactive
+        const char* title;  // reactive
 
         // These values don't include the window border, only the client area.
         LK_S32 x;       // reactive
@@ -472,7 +472,7 @@ typedef struct LK_Platform_Structure
         LK_B32 application_expects_input;
 
         LK_Digital_Button state[LK__KEY_COUNT];
-        char* text; // UTF-8 formatted string.
+        const char* text; // UTF-8 formatted string.
 
         LK_B32 disable_windows_keys;
     } keyboard;
@@ -747,16 +747,16 @@ static WCHAR* lk_get_module_directory()
     return path;
 }
 
-static WCHAR* lk_wchar_concatenate(WCHAR* str1, WCHAR* str2, WCHAR* str3, WCHAR* str4)
+static WCHAR* lk_wchar_concatenate(const WCHAR* str1, const WCHAR* str2, const WCHAR* str3, const WCHAR* str4)
 {
     int i;
-    WCHAR* strings[4] = { str1, str2, str3, str4 };
+    const WCHAR* strings[4] = { str1, str2, str3, str4 };
     SIZE_T size = 1;
 
     // compute the concatenated string length
     for (i = 0; i < 4; i++)
     {
-        WCHAR* cursor = strings[i];
+        const WCHAR* cursor = strings[i];
         if (!cursor) continue;
         while (*(cursor++)) size++;
     }
@@ -768,7 +768,7 @@ static WCHAR* lk_wchar_concatenate(WCHAR* str1, WCHAR* str2, WCHAR* str3, WCHAR*
     WCHAR* write = result;
     for (i = 0; i < 4; i++)
     {
-        WCHAR* cursor = strings[i];
+        const WCHAR* cursor = strings[i];
         if (!cursor) continue;
         while (*cursor) *(write++) = *(cursor++);
     }
@@ -1011,7 +1011,7 @@ typedef struct
 #ifndef LK_PLATFORM_NO_DLL
 
 #ifndef LK_PLATFORM_DLL_NAME
-#error "lk_platform->h implementation expects LK_PLATFORM_DLL_NAME to be defined before it is included."
+#error "lk_platform.h implementation expects LK_PLATFORM_DLL_NAME to be defined before it is included."
 #endif
 
 #define LK_WCHAR_LITERAL(name) LK_WCHAR_LITERAL_(name)
@@ -1024,7 +1024,7 @@ static void lk_set_dll_paths(LK_Client* client, LK_U32 serial)
     WCHAR serial_string[16];
     WCHAR* serial_write = serial_string;
 
-    WCHAR* hex_lut = L"0123456789abcdef";
+    const WCHAR* hex_lut = L"0123456789abcdef";
     while (serial != 0)
     {
         *(serial_write++) = hex_lut[serial & 0xF];
@@ -1222,6 +1222,46 @@ static void lk_update_client(LK_Platform* platform, LK_Client* client, LK_Circul
 
 
 ////////////////////////////////////////////////////////////////////////////////
+// Canvas
+////////////////////////////////////////////////////////////////////////////////
+
+
+typedef struct
+{
+    LK_U32 width;
+    LK_U32 height;
+    LK_U8 data[0];
+} LK_Canvas;
+
+static LK_Canvas* lk_make_canvas(LK_U32 width, LK_U32 height)
+{
+    LK_U32 canvas_size = width * height * 4;
+    LK_Canvas* canvas = (LK_Canvas*) LocalAlloc(LMEM_FIXED, sizeof(LK_Canvas) + canvas_size);
+    canvas->width = width;
+    canvas->height = height;
+    return canvas;
+}
+
+static void lk_free_canvas(LK_Canvas* canvas)
+{
+    if (canvas != 0)
+        LocalFree(canvas);
+}
+
+static void lk_give_canvas(LK_Canvas* volatile* shared, LK_Canvas* canvas)
+{
+    LK_Canvas* old = (LK_Canvas*) InterlockedExchangePointer((volatile PVOID*) shared, canvas);
+    lk_free_canvas(old);
+}
+
+static LK_Canvas* lk_take_canvas(LK_Canvas* volatile* shared)
+{
+    LK_Canvas* canvas = (LK_Canvas*) InterlockedExchangePointer((volatile PVOID*) shared, NULL);
+    return canvas;
+}
+
+
+////////////////////////////////////////////////////////////////////////////////
 // Window thread
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -1308,7 +1348,13 @@ typedef struct
 
     LK_Circular_Buffer text;
 
+    // shared
+
+    LK_Canvas* volatile canvas;
+
     // internal
+
+    LK_Canvas* last_canvas;
 
     HCURSOR arrow_cursor;
     LK_B32 has_raw_mouse_input;
@@ -1662,8 +1708,48 @@ lk_window_callback(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam)
 
     case WM_PAINT:
     {
+        LK_Canvas* new_canvas = lk_take_canvas(&window->canvas);
+        if (new_canvas)
+        {
+            lk_free_canvas(window->last_canvas);
+            window->last_canvas = new_canvas;
+        }
+
         PAINTSTRUCT paint;
         BeginPaint(hwnd, &paint);
+
+        LK_Canvas* canvas = window->last_canvas;
+        if (canvas)
+        {
+            RECT rect;
+            GetClientRect(hwnd, &rect);
+            LK_U32 window_width  = (LK_U32)(rect.right - rect.left);
+            LK_U32 window_height = (LK_U32)(rect.bottom - rect.top);
+
+            BITMAPINFO bitmap = { 0 };
+            bitmap.bmiHeader.biSize        = sizeof(BITMAPINFOHEADER);
+            bitmap.bmiHeader.biWidth       = canvas->width;
+            bitmap.bmiHeader.biHeight      = canvas->height;
+            bitmap.bmiHeader.biPlanes      = 1;
+            bitmap.bmiHeader.biBitCount    = 32;
+            bitmap.bmiHeader.biCompression = BI_RGB;
+
+            StretchDIBits(paint.hdc,
+                0, 0, window_width, window_height,
+                0, 0, canvas->width, canvas->height,
+                canvas->data, &bitmap, DIB_RGB_COLORS, SRCCOPY);
+        }
+#if 0
+        else
+        {
+            RECT rect;
+            GetClientRect(hwnd, &rect);
+            HBRUSH brush = CreateSolidBrush(RGB(1, 133, 1));
+            FillRect(paint.hdc, &rect, brush);
+            DeleteObject(brush);
+        }
+#endif
+
         EndPaint(hwnd, &paint);
     } break;  // default proc
 
@@ -2211,7 +2297,7 @@ static void lk_make_notification_client(LK_MMNotificationClient* client, EDataFl
 typedef struct
 {
     HMODULE avrt;
-    HANDLE(WINAPI *AvSetMmThreadCharacteristicsW)(LPWSTR, LPDWORD);
+    HANDLE(WINAPI *AvSetMmThreadCharacteristicsW)(LPCWSTR, LPDWORD);
     BOOL(WINAPI *AvRevertMmThreadCharacteristics)(HANDLE);
     BOOL initialized_com;
     IMMDeviceEnumerator* enumerator;
@@ -3686,8 +3772,6 @@ void lk_entry(LK_Client_Functions* functions)
         WaitForSingleObject(window.opened, INFINITE);
     }
 
-    BITMAPINFO canvas_bitmap = { 0 };
-
     //
     // Start audio threads.
     //
@@ -3702,6 +3786,8 @@ void lk_entry(LK_Client_Functions* functions)
     // Prepare for gamepad input handling.
     if (has_window)
         lk_init_gamepad_support(&platform, &gamepad);
+
+    LK_Canvas* canvas = NULL;
 
     // Variables to keep track of previous window state.
     LK_S32 last_window_x;
@@ -3934,32 +4020,6 @@ void lk_entry(LK_Client_Functions* functions)
 
             platform.window.monitor_refresh_rate = window.monitor_refresh_rate;
 
-            // resize canvas if necessary
-            if (backend == LK_WINDOW_CANVAS)
-            {
-                BITMAPINFOHEADER* header = &canvas_bitmap.bmiHeader;
-                if (width != header->biWidth || height != header->biHeight)
-                {
-                    if (platform.canvas.data)
-                    {
-                        VirtualFree(platform.canvas.data, 0, MEM_RELEASE);
-                    }
-
-                    header->biSize        = sizeof(BITMAPINFOHEADER);
-                    header->biWidth       = width;
-                    header->biHeight      = height;
-                    header->biPlanes      = 1;
-                    header->biBitCount    = 32;
-                    header->biCompression = BI_RGB;
-
-                    void* canvas = VirtualAlloc(0, width * height * 4, MEM_COMMIT, PAGE_READWRITE);
-                    platform.canvas.data = (LK_U8*) canvas;
-                }
-
-                platform.canvas.width  = width;
-                platform.canvas.height = height;
-            }
-
             // update mouse cursor
             {
                 POINT cursor;
@@ -4051,6 +4111,19 @@ void lk_entry(LK_Client_Functions* functions)
             lk_update_gamepads(&platform, &window, &gamepad, &errors);
         }
 
+        // Make a canvas, if using that backend.
+        if (backend == LK_WINDOW_CANVAS)
+        {
+            if (!canvas)
+            {
+                canvas = lk_make_canvas(platform.window.width, platform.window.height);
+            }
+
+            platform.canvas.width  = canvas->width;
+            platform.canvas.height = canvas->height;
+            platform.canvas.data   = canvas->data;
+        }
+
         //
         // Call the client.
         //
@@ -4103,11 +4176,10 @@ void lk_entry(LK_Client_Functions* functions)
                 void* pixels = platform.canvas.data;
                 if (pixels)
                 {
-                    StretchDIBits(window.dc,
-                        0, 0, platform.window.width, platform.window.height,
-                        0, 0, platform.canvas.width, platform.canvas.height,
-                        pixels, &canvas_bitmap,
-                        DIB_RGB_COLORS, SRCCOPY);
+                    lk_give_canvas(&window.canvas, canvas);
+                    canvas = NULL;
+
+                    RedrawWindow(window.hwnd, NULL, NULL, RDW_INVALIDATE);
                 }
             }
             else if (backend == LK_WINDOW_OPENGL)
@@ -4129,11 +4201,6 @@ void lk_entry(LK_Client_Functions* functions)
     // Inform the client that we're closing.
     lk_update_time_stamp(&time, &platform);
     client.functions.close(&platform);
-
-    // Destroy canvas.
-    if (backend == LK_WINDOW_CANVAS)
-        if (platform.canvas.data)
-            VirtualFree(platform.canvas.data, 0, MEM_RELEASE);
 
     // Uninitialize OpenGL.
     if (backend == LK_WINDOW_OPENGL)
@@ -4160,6 +4227,11 @@ void lk_entry(LK_Client_Functions* functions)
         CloseHandle(window.close);
         CloseHandle(window.unpause);
     }
+
+    // Destroy canvas.
+    lk_free_canvas(canvas);
+    lk_free_canvas(lk_take_canvas(&window.canvas));
+    lk_free_canvas(window.last_canvas);
 
     lk_unload_client(&platform, &client);
 }
