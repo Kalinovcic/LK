@@ -158,6 +158,25 @@ typedef struct
 
 typedef enum
 {
+    LK_CURSOR_NORMAL,          // arrow
+    LK_CURSOR_CLICKABLE,       // hand
+    LK_CURSOR_EDITABLE_TEXT,   // i-beam
+    LK_CURSOR_WAITING,         // spinning circle
+    LK_CURSOR_BACKGROUND_WORK, // arrow with spinning circle
+    LK_CURSOR_PRECISION,       // crosshair
+    LK_CURSOR_MOVE,            // arrows pointing in all 4 cardinal directions
+    LK_CURSOR_RESIZE_WE,       // arrow pointing west and east
+    LK_CURSOR_RESIZE_NS,       // arrow pointing north and south
+    LK_CURSOR_RESIZE_NWSE,     // arrow pointing north-west and south-east
+    LK_CURSOR_RESIZE_NESW,     // arrow pointing north-east and south-west
+    LK_CURSOR_UNAVAILABLE,     // slashed circle or crossbones
+    LK_CURSOR_HIDDEN,          // the cursor is not displayed
+
+    LK__CURSOR_COUNT
+} LK_System_Cursor;
+
+typedef enum
+{
 // The following constants match their ASCII encoding
     LK_KEY_BACKSPACE = '\b', // 8
     LK_KEY_TAB       = '\t', // 9
@@ -453,6 +472,8 @@ typedef struct LK_Platform_Structure
         LK_Digital_Button left_button;
         LK_Digital_Button right_button;
         LK_Digital_Button middle_button;
+
+        LK_System_Cursor cursor;  // default is LK_CURSOR_NORMAL
     } mouse;
 
     struct
@@ -1266,6 +1287,9 @@ static LK_Canvas* lk_take_canvas(LK_Canvas* volatile* shared)
 ////////////////////////////////////////////////////////////////////////////////
 
 
+#define LK_WM_UPDATE_CURSOR   (WM_USER + 1)
+
+
 typedef enum
 {
     LK_MDT_EFFECTIVE_DPI,
@@ -1356,7 +1380,10 @@ typedef struct
 
     LK_Canvas* last_canvas;
 
-    HCURSOR arrow_cursor;
+    HCURSOR standard_cursors[LK__CURSOR_COUNT];
+    LK_B32 cursor_is_inside_htclient;
+    LK_System_Cursor volatile cursor_icon;
+
     LK_B32 has_raw_mouse_input;
     LK_B32 has_raw_keyboard_input;
 
@@ -1755,12 +1782,20 @@ lk_window_callback(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam)
 
     case WM_SETCURSOR:
     {
-        if (LOWORD(lparam) == HTCLIENT)
-        {
-            SetCursor(window->arrow_cursor);
-            return 1;
-        }
+        window->cursor_is_inside_htclient = (LOWORD(lparam) == HTCLIENT);
+        if (window->cursor_is_inside_htclient)
+            goto update_cursor;
     } break;  // default proc
+
+    update_cursor:
+    case LK_WM_UPDATE_CURSOR:
+    {
+        if (window->cursor_is_inside_htclient)
+        {
+            SetCursor(window->standard_cursors[window->cursor_icon]);
+        }
+        return 1;
+    } break;
 
     case WM_SYSCOMMAND:
     {
@@ -2119,7 +2154,23 @@ static DWORD CALLBACK lk_window_thread(LPVOID window_ptr)
         LK_GetProc(window->shcore, window->SetProcessDpiAwareness, "SetProcessDpiAwareness");
     }
 
-    window->arrow_cursor = LoadCursor(NULL, IDC_ARROW);
+    window->standard_cursors[LK_CURSOR_NORMAL         ] = LoadCursor(NULL, IDC_ARROW);
+    window->standard_cursors[LK_CURSOR_CLICKABLE      ] = LoadCursor(NULL, IDC_HAND);
+    window->standard_cursors[LK_CURSOR_EDITABLE_TEXT  ] = LoadCursor(NULL, IDC_IBEAM);
+    window->standard_cursors[LK_CURSOR_WAITING        ] = LoadCursor(NULL, IDC_WAIT);
+    window->standard_cursors[LK_CURSOR_BACKGROUND_WORK] = LoadCursor(NULL, IDC_APPSTARTING);
+    window->standard_cursors[LK_CURSOR_PRECISION      ] = LoadCursor(NULL, IDC_CROSS);
+    window->standard_cursors[LK_CURSOR_MOVE           ] = LoadCursor(NULL, IDC_SIZEALL);
+    window->standard_cursors[LK_CURSOR_RESIZE_WE      ] = LoadCursor(NULL, IDC_SIZEWE);
+    window->standard_cursors[LK_CURSOR_RESIZE_NS      ] = LoadCursor(NULL, IDC_SIZENS);
+    window->standard_cursors[LK_CURSOR_RESIZE_NWSE    ] = LoadCursor(NULL, IDC_SIZENWSE);
+    window->standard_cursors[LK_CURSOR_RESIZE_NESW    ] = LoadCursor(NULL, IDC_SIZENESW);
+    window->standard_cursors[LK_CURSOR_UNAVAILABLE    ] = LoadCursor(NULL, IDC_NO);
+    window->standard_cursors[LK_CURSOR_HIDDEN         ] = NULL;
+
+    window->cursor_is_inside_htclient = 0;
+    window->cursor_icon = LK_CURSOR_NORMAL;
+
     window->client_has_win32_handler = 1;  // assume there's a lk_client_win32_event_handler
 
     lk_try_set_dpi_awareness(window);
@@ -3832,6 +3883,8 @@ void lk_entry(LK_Client_Functions* functions)
     POINT last_cursor;
     GetCursorPos(&last_cursor);
 
+    LK_System_Cursor last_cursor_icon = (LK_System_Cursor) -1;
+
     // Variables to keep text input.
     char text_buffer[LK_CIRCULAR_BUFFER_SIZE + 1];
 
@@ -4048,6 +4101,15 @@ void lk_entry(LK_Client_Functions* functions)
                 if (platform.mouse.delta_x || platform.mouse.delta_x_raw ||
                     platform.mouse.delta_y || platform.mouse.delta_y_raw)
                     platform.event_mask |= LK_EVENT_MOUSE_MOVE;
+            }
+
+            // update cursor icon
+            LK_System_Cursor cursor_icon = platform.mouse.cursor;
+            if (cursor_icon != last_cursor_icon)
+            {
+                window.cursor_icon = cursor_icon;
+                last_cursor_icon = cursor_icon;
+                PostMessage(window.hwnd, LK_WM_UPDATE_CURSOR, 0, 0);
             }
 
             // update mouse wheel
